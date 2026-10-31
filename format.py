@@ -12,7 +12,7 @@ from checks import (
 )
 from flags import detect_flags, heads_up_lines
 from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, too_long
-from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract
+from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract, summarize
 from lookups import lookup_ifsc, lookup_pin
 from suggest import gstin_typo_fixes
 import vendors
@@ -281,10 +281,24 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
             changed, same = vendors.compare(vendor, ids)
 
     ev = _evaluate(found, bad, store, vendor, changed, same)
+    summary = None
+    if llm.client and llm.summary and allow_llm(store, sender, now):
+        summary = summarize(summary_input(ev, changed, flag_labels), llm.client)
     return _check_reply(
         ev, flag_labels=flag_labels, vendor=vendor, changed=changed, from_saved=from_saved,
-        llm_read=llm_read, provider_name=llm.provider_name,
+        llm_read=llm_read, provider_name=llm.provider_name, summary=summary,
     )
+
+
+def summary_input(ev, changed=(), flag_labels=()):
+    """The structured results a summary may draw on. Never includes the user's message."""
+    return {
+        "counts": ev["counts"],
+        "items": [{k: r[k] for k in ("kind", "id", "level", "text")} for r in ev["items"]],
+        "cross": [{"level": r["level"], "text": r["text"]} for r in ev["cross"]],
+        "bank_details_changed_since_saved": bool(changed),
+        "wording_flags": list(flag_labels),
+    }
 
 
 def _message_ids(found, text):
@@ -347,7 +361,7 @@ def _evaluate(found, bad, store, vendor=None, changed=(), same=()):
 
 
 def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
-                 llm_read=None, provider_name=None, title=None):
+                 llm_read=None, provider_name=None, title=None, summary=None):
     items, cross, counts, notes = ev["items"], ev["cross"], ev["counts"], ev["notes"]
     lines = [title, ""] if title else []
     lines.append(
@@ -385,6 +399,10 @@ def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
     for n in notes:
         lines.append("")
         lines.append(n)
+    if summary:
+        lines.append("")
+        lines.append("**In short** _(written by an AI model (%s) from the checks above)_: %s"
+                     % (provider_name, summary))
     lines.append("")
     lines.append(DISCLAIMER)
     return "\n".join(lines)

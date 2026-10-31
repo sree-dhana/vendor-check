@@ -8,6 +8,7 @@ they contain a banned phrase or an ID that is not in the results. Every failure 
 None so the caller behaves exactly as if the LLM were off."""
 import json
 import os
+import re
 from collections import namedtuple
 
 import requests
@@ -210,10 +211,18 @@ def classify_flags_llm(text, client):
 
 SUMMARY_SYSTEM = (
     "You rewrite the results of a vendor ID check into at most two short, plain sentences for a "
-    "small-business owner. Use only facts in the results. Do not add facts, IDs, advice beyond "
-    "the results, or any verdict. Never say or imply the vendor or payment is safe, verified, "
-    "legit, trusted or guaranteed. Say what was checked and what was not."
+    "small-business owner. Lead with any problem (level 'fail'), then anything to confirm "
+    "(level 'warn'). Use only facts in the results and keep each fact attached to the ID it is "
+    "about. An IFSC result identifies a bank branch only; it says nothing about any bank account. "
+    "Do not add facts, IDs, advice or any verdict. Never say or imply that anything is safe, "
+    "verified, confirmed, validated, genuine, legit, trusted or guaranteed."
 )
+# Words that claim more than a format/checksum/lookup check can show.
+OVERCLAIM_RE = re.compile(
+    r"\b(?:confirm(?:s|ed)|verif(?:y|ied|ies)|validated|genuine|authentic|approved)\b", re.IGNORECASE
+)
+SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
+MAX_SUMMARY_SENTENCES = 2
 SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": "string"}},
@@ -227,6 +236,8 @@ def validate_summary(summary, results):
         return None
     summary = " ".join(summary.split())
     if not summary or len(summary) > MAX_SUMMARY_CHARS or contains_banned(summary):
+        return None
+    if OVERCLAIM_RE.search(summary) or len(SENTENCE_END.findall(summary)) > MAX_SUMMARY_SENTENCES:
         return None
     known = set()
     for r in results.get("items", []) + results.get("cross", []):
