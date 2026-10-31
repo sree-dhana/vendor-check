@@ -10,6 +10,7 @@ from checks import (
     cross_checks,
 )
 from flags import detect_flags, heads_up_lines
+from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_message, too_long
 from lookups import lookup_ifsc, lookup_pin
 from suggest import gstin_typo_fixes
 
@@ -111,8 +112,12 @@ def _selftest(store):
     return "selftest: ifsc=%s, pin=%s" % (ifsc, pin)
 
 
-def reply_for_text(text, store):
+def reply_for_text(text, store, sender="local", now=None):
+    if not allow_message(store, sender, now):
+        return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
+    if too_long(t):
+        return TOO_LONG_TEXT % len(t)
     low = t.lower()
 
     if low == "selftest":

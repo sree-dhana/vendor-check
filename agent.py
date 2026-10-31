@@ -67,7 +67,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         return
 
     try:
-        reply = reply_for_text(text, Store(ctx.storage))
+        reply = reply_for_text(text, Store(ctx.storage), sender=sender)
     except Exception:
         ctx.logger.exception("VendorCheck failed")  # never log the user's text
         reply = (
