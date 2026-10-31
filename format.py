@@ -13,6 +13,7 @@ from flags import detect_flags, heads_up_lines
 from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_message, too_long
 from lookups import lookup_ifsc, lookup_pin
 from suggest import gstin_typo_fixes
+import vendors
 
 ICON = {"pass": "✅", "warn": "⚠️", "fail": "❌"}
 DOT = " · "
@@ -53,6 +54,11 @@ GREETINGS = {"hi", "hii", "hello", "hey", "help", "start", "menu", "?", "namaste
 
 # ASI:One prefixes messages with the agent mention, e.g. "@agent1q... help" or "@vendor-check help".
 LEADING_MENTIONS = re.compile(r"^(?:\s*@\S+)+")
+
+SAVE_RE = re.compile(r"^save\s+vendor\b\s*(.*)$", re.I | re.S)
+FORGET_RE = re.compile(r"^forget\b\s*(.*)$", re.I | re.S)
+CHECK_NAME_RE = re.compile(r"^check\s+(.+)$", re.I | re.S)
+MY_VENDORS = {"my vendors", "vendors", "list vendors", "saved vendors"}
 
 
 def _yn(v):
@@ -112,6 +118,78 @@ def _selftest(store):
     return "selftest: ifsc=%s, pin=%s" % (ifsc, pin)
 
 
+def _ids_line(rec):
+    parts = ["%s `%s`" % (vendors.FIELD_LABELS[f], vendors.mask(f, rec[f]) if f == "acct_last4" else rec[f])
+             for f in vendors.FIELDS if rec.get(f)]
+    return ", ".join(parts)
+
+
+def _vendor_command(t, low, store, sender, now):
+    """Handle the saved-vendor commands. Returns a reply, or None if `t` is not one."""
+    if low in MY_VENDORS:
+        recs = vendors.list_vendors(store, sender)
+        if not recs:
+            return "You haven't saved any vendors yet. After a check, say `save vendor <name>`."
+        lines = ["**Your saved vendors** (%d)" % len(recs)]
+        lines.extend("- **%s**: %s" % (r["name"], _ids_line(r)) for r in recs)
+        lines.append("")
+        lines.append("Say `check <name>` to check one again, or `forget <name>` to delete it.")
+        return "\n".join(lines)
+
+    m = SAVE_RE.match(t)
+    if m:
+        rest = m.group(1)
+        name = vendors.name_part(rest)
+        found, _ = extract_ids(rest)
+        ids = {k: found[k][0] for k in ("gstin", "pan", "ifsc") if found[k]}
+        last4 = vendors.account_last4(rest)
+        if last4:
+            ids["acct_last4"] = last4
+        if not ids:
+            ids = vendors.last_ids(store, sender, now)
+        status = vendors.save_vendor(store, sender, name, ids)
+        if status == "no_name":
+            return "Please give the vendor a name, for example `save vendor Sharma Traders`."
+        if status == "no_ids":
+            return ("I didn't find any IDs to save. Send `save vendor <name>` right after a check, "
+                    "or together with the vendor's GSTIN, PAN or IFSC.")
+        if status == "full":
+            return "You already have %d saved vendors. Say `forget <name>` to make room." % vendors.MAX_VENDORS
+        rec = vendors.get_vendor(store, sender, name)
+        verb = "Updated" if status == "updated" else "Saved"
+        return (
+            "%s **%s**: %s.\n\n"
+            "Next time, say `check %s` with the IDs from the new invoice and I'll tell you if the "
+            "bank details changed. Say `forget %s` to delete it. I keep only the name and these IDs, "
+            "never full account numbers." % (verb, rec["name"], _ids_line(rec), rec["name"], rec["name"])
+        )
+
+    m = FORGET_RE.match(t)
+    if m:
+        arg = m.group(1).strip()
+        if not arg:
+            return "Say `forget <name>` to delete one saved vendor, or `forget all` to delete everything."
+        if arg.lower() == "all":
+            n = vendors.forget_all(store, sender)
+            return "Deleted %d saved vendor%s and your recent check." % (n, "" if n == 1 else "s")
+        if vendors.forget(store, sender, arg):
+            return "Deleted **%s**." % vendors.clean_name(arg)
+        return ("I don't have a saved vendor called **%s**. Say `my vendors` to see the list."
+                % vendors.clean_name(arg))
+    return None
+
+
+def _change_lines(name, changed):
+    lines = ["❌ **Bank details changed since you saved %s**" % name]
+    for f, old, new in changed:
+        lines.append("- %s: was `%s`, now `%s`" % (vendors.FIELD_LABELS[f], vendors.mask(f, old), vendors.mask(f, new)))
+    lines.append(
+        "Call the vendor on a number you already have before paying. If the change is genuine, "
+        "say `save vendor %s` with the new details to update it." % name
+    )
+    return lines
+
+
 def reply_for_text(text, store, sender="local", now=None):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
@@ -123,9 +201,25 @@ def reply_for_text(text, store, sender="local", now=None):
     if low == "selftest":
         return _selftest(store)
 
+    reply = _vendor_command(t, low, store, sender, now)
+    if reply is not None:
+        return reply
+
     found, bad = extract_ids(t)
     flag_labels = detect_flags(t)
     nothing = not any(found.values()) and not any(bad.values())
+
+    vendor, from_saved = None, False
+    m = CHECK_NAME_RE.match(t)
+    if m:
+        vendor = vendors.get_vendor(store, sender, vendors.name_part(m.group(1)))
+        if vendor and nothing:
+            found = {k: [vendor[k]] if vendor.get(k) else [] for k in ("gstin", "pan", "ifsc", "pin")}
+            nothing, from_saved = False, True
+        elif nothing and vendors.list_vendors(store, sender):
+            return ("I don't have a saved vendor called **%s**. Say `my vendors` to see the list."
+                    % vendors.name_part(m.group(1)))
+
     if nothing:
         if not t or low in GREETINGS or low.startswith("help"):
             return HELP_TEXT
@@ -134,6 +228,18 @@ def reply_for_text(text, store, sender="local", now=None):
         if flag_labels:
             return "\n".join(heads_up_lines(flag_labels) + ["", NO_ID_TEXT])
         return NO_ID_TEXT
+
+    changed, same = [], []
+    if not from_saved:
+        ids = {k: found[k][0] for k in ("gstin", "pan", "ifsc") if found[k]}
+        last4 = vendors.account_last4(t)
+        if last4:
+            ids["acct_last4"] = last4
+        vendors.remember_last(store, sender, ids, now)
+        if vendor is None and found["gstin"]:
+            vendor = vendors.find_by_gstin(store, sender, found["gstin"][0])
+        if vendor:
+            changed, same = vendors.compare(vendor, ids)
 
     notes = []
     for kind in found:
@@ -168,10 +274,18 @@ def reply_for_text(text, store, sender="local", now=None):
             items.append(check_malformed(kind, tok))
 
     cross = cross_checks(gst_res, pans_ok, ifsc_res, pin_res)
+    if same and not changed:
+        cross.append({
+            "level": "pass",
+            "text": "Same %s as you saved for %s." % (
+                " and ".join(vendors.FIELD_LABELS[f] for f in same), vendor["name"]),
+        })
 
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for r in items + cross:
         counts[r["level"]] += 1
+    if changed:
+        counts["fail"] += 1
 
     lines = []
     lines.append(
@@ -185,8 +299,14 @@ def reply_for_text(text, store, sender="local", now=None):
     if flag_labels:
         lines.append("")
         lines.extend(heads_up_lines(flag_labels))
+    if changed:
+        lines.append("")
+        lines.extend(_change_lines(vendor["name"], changed))
     lines.append("")
-    lines.append("**Checks**")
+    if from_saved:
+        lines.append("**Checks** (the details you saved for %s)" % vendor["name"])
+    else:
+        lines.append("**Checks**")
     for r in items:
         lines.append("%s %s `%s`: %s" % (ICON[r["level"]], LABELS[r["kind"]], r["id"], r["text"]))
         lines.extend(_typo_lines(r))
