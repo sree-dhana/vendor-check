@@ -9,6 +9,7 @@ from checks import (
     check_malformed,
     cross_checks,
 )
+from flags import detect_flags, heads_up_lines
 from lookups import lookup_ifsc, lookup_pin
 from suggest import gstin_typo_fixes
 
@@ -44,7 +45,7 @@ NO_ID_TEXT = (
 
 DISCLAIMER = (
     "_These are format, checksum and consistency checks. They don't prove identity, "
-    "registration status, or that a payment is safe._"
+    "registration status, or that a payment carries no risk._"
 )
 
 GREETINGS = {"hi", "hii", "hello", "hey", "help", "start", "menu", "?", "namaste"}
@@ -118,12 +119,15 @@ def reply_for_text(text, store):
         return _selftest(store)
 
     found, bad = extract_ids(t)
+    flag_labels = detect_flags(t)
     nothing = not any(found.values()) and not any(bad.values())
     if nothing:
         if not t or low in GREETINGS or low.startswith("help"):
             return HELP_TEXT
         if low in ("sample", "samples", "example", "examples"):
             return SAMPLE_TEXT
+        if flag_labels:
+            return "\n".join(heads_up_lines(flag_labels) + ["", NO_ID_TEXT])
         return NO_ID_TEXT
 
     notes = []
@@ -173,6 +177,9 @@ def reply_for_text(text, store):
         lines.append("Resolve the problems before paying.")
     elif not counts["warn"]:
         lines.append("No problems found in these checks.")
+    if flag_labels:
+        lines.append("")
+        lines.extend(heads_up_lines(flag_labels))
     lines.append("")
     lines.append("**Checks**")
     for r in items:
