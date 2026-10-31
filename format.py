@@ -1,4 +1,5 @@
 import re
+import time
 
 from checks import (
     MAX_PER_TYPE,
@@ -60,6 +61,12 @@ SAVE_RE = re.compile(r"^save\s+vendor\b\s*(.*)$", re.I | re.S)
 FORGET_RE = re.compile(r"^forget\b\s*(.*)$", re.I | re.S)
 CHECK_NAME_RE = re.compile(r"^check\s+(.+)$", re.I | re.S)
 MY_VENDORS = {"my vendors", "vendors", "list vendors", "saved vendors"}
+DETAILS_RE = re.compile(r"^(?:details?|show)\s+(?:of\s+|for\s+)?(?:vendor\s+)?#?(\d{1,2})$", re.I)
+
+BATCH_MAX = 5
+BLANK_SPLIT = re.compile(r"\n\s*\n")
+PIECE_SPLIT = re.compile(r"[;\n]")
+BULLET = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s*")
 
 
 def _yn(v):
@@ -74,6 +81,7 @@ def _ifsc_result(code, store):
         place = ", ".join([x for x in (d["city"], d["state"]) if x])
         r["level"] = "pass"
         r["state"] = d["state"]
+        r["bank"] = d["bank"]
         r["text"] = "%s, %s (%s). NEFT %s, RTGS %s, IMPS %s, UPI %s." % (
             d["bank"], d["branch"], place,
             _yn(d["neft"]), _yn(d["rtgs"]), _yn(d["imps"]), _yn(d["upi"]),
@@ -213,6 +221,9 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     reply = _vendor_command(t, low, store, sender, now)
     if reply is not None:
         return reply
+    m = DETAILS_RE.match(t)
+    if m:
+        return _details_reply(int(m.group(1)), store, sender, now)
 
     found, bad = extract_ids(t)
     flag_labels = detect_flags(t)
@@ -234,6 +245,11 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
             return HELP_TEXT
         if low in ("sample", "samples", "example", "examples"):
             return SAMPLE_TEXT
+
+    if not nothing and not from_saved:
+        chunks = split_vendors(t)
+        if chunks:
+            return _batch_reply(chunks, store, sender, now, flag_labels)
 
     llm_read = None
     if (llm.client and llm.extract and not from_saved and should_extract(t, found)
@@ -257,16 +273,30 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
 
     changed, same = [], []
     if not from_saved:
-        ids = {k: found[k][0] for k in ("gstin", "pan", "ifsc") if found[k]}
-        last4 = vendors.account_last4(t)
-        if last4:
-            ids["acct_last4"] = last4
+        ids = _message_ids(found, t)
         vendors.remember_last(store, sender, ids, now)
         if vendor is None and found["gstin"]:
             vendor = vendors.find_by_gstin(store, sender, found["gstin"][0])
         if vendor:
             changed, same = vendors.compare(vendor, ids)
 
+    ev = _evaluate(found, bad, store, vendor, changed, same)
+    return _check_reply(
+        ev, flag_labels=flag_labels, vendor=vendor, changed=changed, from_saved=from_saved,
+        llm_read=llm_read, provider_name=llm.provider_name,
+    )
+
+
+def _message_ids(found, text):
+    ids = {k: found[k][0] for k in ("gstin", "pan", "ifsc") if found[k]}
+    last4 = vendors.account_last4(text)
+    if last4:
+        ids["acct_last4"] = last4
+    return ids
+
+
+def _evaluate(found, bad, store, vendor=None, changed=(), same=()):
+    """Run every check on the IDs found. All pass/warn/fail levels come from here."""
     notes = []
     for kind in found:
         if len(found[kind]) > MAX_PER_TYPE or len(bad[kind]) > MAX_PER_TYPE:
@@ -312,8 +342,14 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
         counts[r["level"]] += 1
     if changed:
         counts["fail"] += 1
+    return {"items": items, "cross": cross, "counts": counts, "notes": notes,
+            "gst_res": gst_res, "ifsc_res": ifsc_res, "pans": pans_ok}
 
-    lines = []
+
+def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
+                 llm_read=None, provider_name=None, title=None):
+    items, cross, counts, notes = ev["items"], ev["cross"], ev["counts"], ev["notes"]
+    lines = [title, ""] if title else []
     lines.append(
         "**%d passed%s%d to confirm%s%d problem%s**"
         % (counts["pass"], DOT, counts["warn"], DOT, counts["fail"], "" if counts["fail"] == 1 else "s")
@@ -324,7 +360,7 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
         lines.append("No problems found in these checks.")
     if llm_read:
         lines.append("")
-        lines.append(_llm_read_line(llm_read, llm.provider_name))
+        lines.append(_llm_read_line(llm_read, provider_name))
     if flag_labels:
         lines.append("")
         lines.extend(heads_up_lines(flag_labels))
@@ -345,15 +381,135 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
         for r in cross:
             lines.append("%s %s" % (ICON[r["level"]], r["text"]))
 
-    lines.append("")
-    lines.append("**Before you pay**")
-    if gst_res:
-        lines.append("- Confirm the GSTIN is active on the official GST portal (gst.gov.in).")
-    lines.append("- Call the vendor on a number you already have, not one from the invoice or message.")
-    lines.append("- Treat any request to change bank details by WhatsApp or email as suspicious until confirmed.")
+    lines.extend(_before_you_pay(bool(ev["gst_res"])))
     for n in notes:
         lines.append("")
         lines.append(n)
     lines.append("")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
+
+
+def _before_you_pay(has_gstin):
+    lines = ["", "**Before you pay**"]
+    if has_gstin:
+        lines.append("- Confirm the GSTIN is active on the official GST portal (gst.gov.in).")
+    lines.append("- Call the vendor on a number you already have, not one from the invoice or message.")
+    lines.append("- Treat any request to change bank details by WhatsApp or email as suspicious until confirmed.")
+    return lines
+
+
+# ---------- F7: batch check ----------
+
+def split_vendors(text):
+    """Split a message about several vendors into one chunk per vendor, on blank lines,
+    or else on semicolons and lines that each hold a GSTIN. Returns [] for one vendor."""
+    def has_gstin(s):
+        return bool(extract_ids(s)[0]["gstin"])
+
+    def has_ids(s):
+        found, bad = extract_ids(s)
+        return any(found.values()) or any(bad.values())
+
+    blocks = [b for b in BLANK_SPLIT.split(text) if has_ids(b)]
+    if sum(map(has_gstin, blocks)) >= 2:
+        return blocks
+    groups = []
+    for piece in PIECE_SPLIT.split(text):
+        if not piece.strip():
+            continue
+        if has_gstin(piece) or not groups:
+            groups.append(piece)
+        else:
+            groups[-1] += "\n" + piece
+    groups = [g for g in groups if has_ids(g)]
+    return groups if sum(map(has_gstin, groups)) >= 2 else []
+
+
+def _batch_vendor(chunk, n, store, sender):
+    chunk = BULLET.sub("", chunk.strip())
+    found, bad = extract_ids(chunk)
+    name = vendors.name_part(chunk).replace("|", "/") or "Vendor %d" % n
+    ids = _message_ids(found, chunk)
+    vendor = vendors.find_by_gstin(store, sender, found["gstin"][0]) if found["gstin"] else None
+    changed, same = vendors.compare(vendor, ids) if vendor else ([], [])
+    return {"name": name, "found": found, "bad": bad, "ids": ids,
+            "vendor": vendor, "changed": changed, "same": same}
+
+
+def _batch_row(n, v, ev):
+    g = ev["gst_res"][0] if ev["gst_res"] else None
+    gstin = "%s `%s`" % (ICON[g["level"]], g["id"]) if g else "—"
+    usable = g if g and g["level"] != "fail" else None
+    if usable and ev["pans"]:
+        pan = "✅" if usable["pan"] in ev["pans"] else "❌"
+    else:
+        pan = "—"
+    b = ev["ifsc_res"][0] if ev["ifsc_res"] else None
+    if not b:
+        bank = "—"
+    elif b["level"] == "pass":
+        bank = b["bank"]
+    elif b["level"] == "fail":
+        bank = "❌ not found"
+    else:
+        bank = "⚠️ couldn't confirm"
+    c = ev["counts"]
+    if v["changed"]:
+        result = "❌ bank details changed"
+    elif c["fail"]:
+        result = "❌ %d problem%s" % (c["fail"], "" if c["fail"] == 1 else "s")
+    elif c["warn"]:
+        result = "⚠️ %d to confirm" % c["warn"]
+    else:
+        result = "✅ no problems found"
+    return "| %d | %s | %s | %s | %s | %s |" % (n, v["name"], gstin, pan, bank, result)
+
+
+def _batch_reply(chunks, store, sender, now, flag_labels):
+    over = len(chunks) > BATCH_MAX
+    rows, saved, n_fail, n_warn, any_gstin = [], [], 0, 0, False
+    for n, chunk in enumerate(chunks[:BATCH_MAX], 1):
+        v = _batch_vendor(chunk, n, store, sender)
+        ev = _evaluate(v["found"], v["bad"], store, v["vendor"], v["changed"], v["same"])
+        rows.append(_batch_row(n, v, ev))
+        n_fail += bool(ev["counts"]["fail"])
+        n_warn += bool(not ev["counts"]["fail"] and ev["counts"]["warn"])
+        any_gstin = any_gstin or bool(ev["gst_res"])
+        saved.append({"name": v["name"], "found": v["found"], "bad": v["bad"], "ids": v["ids"]})
+    store.set("batch:%s" % sender, {"t": time.time() if now is None else now, "vendors": saved})
+
+    lines = ["**Checked %d vendors%s%d with problems%s%d to confirm**"
+             % (len(rows), DOT, n_fail, DOT, n_warn)]
+    if flag_labels:
+        lines.append("")
+        lines.extend(heads_up_lines(flag_labels))
+    lines.append("")
+    lines.append("| # | Vendor | GSTIN | PAN match | Bank | Result |")
+    lines.append("|---|---|---|---|---|---|")
+    lines.extend(rows)
+    lines.append("")
+    if over:
+        lines.append("I can check up to %d vendors at once, so I checked the first %d. "
+                     "Send the rest in another message." % (BATCH_MAX, BATCH_MAX))
+    lines.append("Say `details 2` for the full check of vendor 2.")
+    lines.extend(_before_you_pay(any_gstin))
+    lines.append("")
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
+def _details_reply(n, store, sender, now):
+    batch = store.get("batch:%s" % sender, {}) or {}
+    now = time.time() if now is None else now
+    if not batch.get("vendors") or now - batch.get("t", 0) > vendors.LAST_CHECK_TTL:
+        return "I don't have a recent batch check. Paste several vendors in one message first."
+    vlist = batch["vendors"]
+    if not 1 <= n <= len(vlist):
+        return "Your last batch had %d vendors. Say `details 1` to `details %d`." % (len(vlist), len(vlist))
+    v = vlist[n - 1]
+    vendor = vendors.find_by_gstin(store, sender, v["found"]["gstin"][0]) if v["found"]["gstin"] else None
+    changed, same = vendors.compare(vendor, v["ids"]) if vendor else ([], [])
+    ev = _evaluate(v["found"], v["bad"], store, vendor, changed, same)
+    return _check_reply(ev, vendor=vendor, changed=changed,
+                        title="**Vendor %d: %s**" % (n, v["name"]))

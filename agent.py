@@ -14,7 +14,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from format import reply_for_text, HELP_TEXT
-from llm import load_config
+from llm import PROVIDERS, load_config
 
 load_dotenv()
 
@@ -97,7 +97,14 @@ async def report_llm(ctx: Context):
             % (LLM.provider_name, LLM.extract, LLM.flags, LLM.summary)
         )
     else:
-        ctx.logger.info("LLM: off (set LLM_PROVIDER and LLM_API_KEY in .env to enable)")
+        provider = os.environ.get("LLM_PROVIDER", "").strip()
+        if provider and provider.lower() not in PROVIDERS:
+            ctx.logger.warning(
+                "LLM: off, unknown LLM_PROVIDER '%s' (use one of: %s; the model goes in LLM_MODEL)"
+                % (provider, ", ".join(PROVIDERS))
+            )
+        else:
+            ctx.logger.info("LLM: off (set LLM_PROVIDER and LLM_API_KEY in .env to enable)")
 
 
 if __name__ == "__main__":
