@@ -1,11 +1,16 @@
 import re
 
-CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+from normalize import (  # noqa: F401  (regexes re-exported for other modules)
+    GSTIN_RE,
+    PAN_RE,
+    IFSC_RE,
+    PIN_RE,
+    tokenize,
+    keyword_before,
+    match_at,
+)
 
-GSTIN_RE = re.compile(r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]")
-PAN_RE = re.compile(r"[A-Z]{5}[0-9]{4}[A-Z]")
-IFSC_RE = re.compile(r"[A-Z]{4}0[A-Z0-9]{6}")
-PIN_RE = re.compile(r"[1-9][0-9]{5}")
+CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 MAX_PER_TYPE = 3
 
@@ -24,7 +29,6 @@ STATE_CODES = {
     "96": "Other Country", "97": "Other Territory", "99": "Centre Jurisdiction",
 }
 
-# Codes no longer issued for new registrations.
 RETIRED_STATE_CODES = {
     "25": ("Daman & Diu", "merged into code 26 (Dadra & Nagar Haveli and Daman & Diu) in 2020"),
     "28": ("Andhra Pradesh (before bifurcation)", "Andhra Pradesh now uses code 37"),
@@ -52,67 +56,24 @@ STATE_ALIASES = {
     "PONDICHERRY": "PUDUCHERRY",
 }
 
-TOKEN_SPLIT = re.compile(r"[\s,;:()\[\]{}<>\"'|/\\=#*]+")
-FILLERS = {"NO", "NUMBER", "NUM", "CODE", "ID", "IS", "OF", "THE"}
-KEYS = {
-    "gstin": {"GSTIN", "GST", "GSTN"},
-    "pan": {"PAN"},
-    "ifsc": {"IFSC", "IFS"},
-    "pin": {"PIN", "PINCODE", "POSTAL", "ZIP", "ZIPCODE"},
-}
-
-
-# ---------- extraction ----------
-
-def tokenize(text):
-    out = []
-    for t in TOKEN_SPLIT.split((text or "").upper()):
-        t = t.strip(".-_").replace("-", "")
-        if t:
-            out.append(t)
-    return out
-
-
-def _keyword_before(tokens, i):
-    """Which ID type does the closest keyword before position i name (skipping filler words)?"""
-    j = i - 1
-    steps = 0
-    while j >= 0 and steps < 3:
-        t = tokens[j]
-        if t in FILLERS:
-            j -= 1
-            steps += 1
-            continue
-        for kind, words in KEYS.items():
-            if t in words:
-                return kind
-        return None
-    return None
-
-
 def extract_ids(text):
-    """Return (found, bad). found: well-formed IDs by type. bad: tokens that follow a keyword
-    (e.g. 'GSTIN') but are not well-formed."""
+    """Return (found, bad). found: well-formed IDs by type, including IDs written with
+    spaces, dashes or dots. bad: tokens that follow a keyword (e.g. 'GSTIN') but are not
+    well-formed."""
     tokens = tokenize(text)
     found = {"gstin": [], "pan": [], "ifsc": [], "pin": []}
     bad = {"gstin": [], "pan": [], "ifsc": [], "pin": []}
-    only_token = len(tokens) == 1
-    for i, t in enumerate(tokens):
-        kind = None
-        if GSTIN_RE.fullmatch(t):
-            kind = "gstin"
-        elif PAN_RE.fullmatch(t):
-            kind = "pan"
-        elif IFSC_RE.fullmatch(t):
-            kind = "ifsc"
-        elif PIN_RE.fullmatch(t):
-            if only_token or _keyword_before(tokens, i) == "pin":
-                kind = "pin"
-        if kind:
-            if t not in found[kind]:
-                found[kind].append(t)
+    i = 0
+    while i < len(tokens):
+        hit = match_at(tokens, i)
+        if hit:
+            kind, value, n = hit
+            if value not in found[kind]:
+                found[kind].append(value)
+            i += n
             continue
-        hint = _keyword_before(tokens, i)
+        t = tokens[i]
+        hint = keyword_before(tokens, i)
         if (
             hint
             and t.isalnum()
@@ -121,8 +82,8 @@ def extract_ids(text):
         ):
             if t not in bad[hint]:
                 bad[hint].append(t)
+        i += 1
     return found, bad
-
 
 
 def gstin_check_char(first14):

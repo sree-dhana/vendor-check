@@ -1,61 +1,7 @@
-import os
-import sys
-
-import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import format as fmt  # noqa: E402
-import lookups  # noqa: E402
-from checks import check_gstin, extract_ids, gstin_check_char  # noqa: E402
-
-
-class MemStore:
-    def __init__(self):
-        self.d = {}
-
-    def get(self, key, default=None):
-        return self.d.get(key, default)
-
-    def set(self, key, value):
-        self.d[key] = value
-
-
-class FakeResp:
-    def __init__(self, status, payload):
-        self.status_code = status
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
-IFSC_OK = {
-    "BANK": "Yes Bank", "BRANCH": "Delhi Nagrik Sehkari Bank", "CITY": "Delhi",
-    "DISTRICT": "Delhi", "STATE": "Maharashtra",
-    "NEFT": True, "RTGS": True, "IMPS": True, "UPI": True,
-}
-PIN_OK = [{
-    "Status": "Success", "Message": "Number of pincode(s) found:1",
-    "PostOffice": [{"Name": "Bangalore GPO", "District": "Bangalore", "State": "Karnataka"}],
-}]
-PIN_NONE = [{"Status": "Error", "Message": "No records found", "PostOffice": None}]
-
-
-@pytest.fixture
-def fake_net(monkeypatch):
-    calls = []
-
-    def fake_get(url, timeout=None, headers=None):
-        calls.append(url)
-        if "razorpay" in url:
-            return FakeResp(200, IFSC_OK) if url.endswith("YESB0DNB002") else FakeResp(404, "Not Found")
-        if url.endswith("560001"):
-            return FakeResp(200, PIN_OK)
-        return FakeResp(200, PIN_NONE)
-
-    monkeypatch.setattr(lookups.requests, "get", fake_get)
-    return calls
+import format as fmt
+import lookups
+from checks import check_gstin, extract_ids, gstin_check_char
+from conftest import FakeResp, MemStore, PIN_OK
 
 
 def test_gstin_checksum_valid_and_invalid():
@@ -121,11 +67,7 @@ def test_ifsc_not_found_and_cache(fake_net):
     assert sum("YESB0DNB002" in u for u in fake_net) == 1
 
 
-def test_greetings_sample_and_nonsense(monkeypatch):
-    def no_net(*a, **k):
-        raise AssertionError("no network expected")
-
-    monkeypatch.setattr(lookups.requests, "get", no_net)
+def test_greetings_sample_and_nonsense(no_net):
     assert fmt.reply_for_text("hello", MemStore()) == fmt.HELP_TEXT
     assert fmt.reply_for_text("  ", MemStore()) == fmt.HELP_TEXT
     assert fmt.reply_for_text("sample", MemStore()) == fmt.SAMPLE_TEXT
