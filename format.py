@@ -10,7 +10,8 @@ from checks import (
     cross_checks,
 )
 from flags import detect_flags, heads_up_lines
-from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_message, too_long
+from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, too_long
+from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract
 from lookups import lookup_ifsc, lookup_pin
 from suggest import gstin_typo_fixes
 import vendors
@@ -190,7 +191,15 @@ def _change_lines(name, changed):
     return lines
 
 
-def reply_for_text(text, store, sender="local", now=None):
+def _llm_read_line(llm_read, provider_name):
+    new, vendor_name = llm_read
+    ids = ", ".join("%s `%s`" % (LABELS[k], v) for k, v in new)
+    who = " for **%s**" % vendor_name if vendor_name else ""
+    return ("_I read these IDs from your message%s with help from an AI model (%s): %s. "
+            "Check they match what you sent._" % (who, provider_name, ids))
+
+
+def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
@@ -225,6 +234,23 @@ def reply_for_text(text, store, sender="local", now=None):
             return HELP_TEXT
         if low in ("sample", "samples", "example", "examples"):
             return SAMPLE_TEXT
+
+    llm_read = None
+    if (llm.client and llm.extract and not from_saved and should_extract(t, found)
+            and allow_llm(store, sender, now)):
+        res = extract_ids_llm(t, llm.client)
+        if res:
+            new = [(k, v) for k in ("gstin", "pan", "ifsc", "pin") for v in res[k] if v not in found[k]]
+            for k, v in new:
+                found[k].append(v)
+            if new:
+                llm_read = (new, res["vendor_name"])
+                nothing = False
+    if (llm.client and llm.flags and flags_inconclusive(t, flag_labels)
+            and allow_llm(store, sender, now)):
+        flag_labels = classify_flags_llm(t, llm.client) or flag_labels
+
+    if nothing:
         if flag_labels:
             return "\n".join(heads_up_lines(flag_labels) + ["", NO_ID_TEXT])
         return NO_ID_TEXT
@@ -296,6 +322,9 @@ def reply_for_text(text, store, sender="local", now=None):
         lines.append("Resolve the problems before paying.")
     elif not counts["warn"]:
         lines.append("No problems found in these checks.")
+    if llm_read:
+        lines.append("")
+        lines.append(_llm_read_line(llm_read, llm.provider_name))
     if flag_labels:
         lines.append("")
         lines.extend(heads_up_lines(flag_labels))

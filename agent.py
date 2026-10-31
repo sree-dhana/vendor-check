@@ -14,12 +14,15 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from format import reply_for_text, HELP_TEXT
+from llm import load_config
 
 load_dotenv()
 
 SEED = os.environ.get("AGENT_SEED")
 if not SEED:
     raise SystemExit("AGENT_SEED is not set. Copy .env.example to .env and set it.")
+
+LLM = load_config()
 
 
 class Store:
@@ -67,7 +70,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         return
 
     try:
-        reply = reply_for_text(text, Store(ctx.storage), sender=sender)
+        reply = reply_for_text(text, Store(ctx.storage), sender=sender, llm=LLM)
     except Exception:
         ctx.logger.exception("VendorCheck failed")  # never log the user's text
         reply = (
@@ -84,6 +87,18 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 
 agent.include(protocol, publish_manifest=True)
+
+
+@agent.on_event("startup")
+async def report_llm(ctx: Context):
+    if LLM.client:
+        ctx.logger.info(
+            "LLM: %s (extract=%s, flags=%s, summary=%s)"
+            % (LLM.provider_name, LLM.extract, LLM.flags, LLM.summary)
+        )
+    else:
+        ctx.logger.info("LLM: off (set LLM_PROVIDER and LLM_API_KEY in .env to enable)")
+
 
 if __name__ == "__main__":
     agent.run()
