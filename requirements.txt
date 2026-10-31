@@ -1,0 +1,4 @@
+uagents>=0.25.5
+requests>=2.31
+python-dotenv>=1.0
+pytest>=8.0,<8.4  # pytest 9 crashes on Python 3.10.0
