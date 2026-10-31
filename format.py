@@ -10,6 +10,7 @@ from checks import (
     cross_checks,
 )
 from lookups import lookup_ifsc, lookup_pin
+from suggest import gstin_typo_fixes
 
 ICON = {"pass": "✅", "warn": "⚠️", "fail": "❌"}
 DOT = " · "
@@ -94,6 +95,15 @@ def _pin_result(pin, store):
     return r
 
 
+def _typo_lines(r):
+    if r.get("fixes"):
+        return ["    ↳ Possible typo fixes, confirm with the vendor: %s"
+                % ", ".join("`%s`" % f for f in r["fixes"])]
+    if r.get("too_many_fixes"):
+        return ["    ↳ Several valid GSTINs are one typo away, too many to guess. Ask the vendor to resend it."]
+    return []
+
+
 def _selftest(store):
     ifsc = lookup_ifsc(SAMPLE_IFSC, store)["status"]
     pin = lookup_pin("560001", store)["status"]
@@ -128,6 +138,8 @@ def reply_for_text(text, store):
 
     for g in found["gstin"][:MAX_PER_TYPE]:
         r = check_gstin(g)
+        if r["level"] == "fail":
+            r["fixes"], r["too_many_fixes"] = gstin_typo_fixes(g, found["pan"])
         gst_res.append(r)
         items.append(r)
     for p in found["pan"][:MAX_PER_TYPE]:
@@ -165,6 +177,7 @@ def reply_for_text(text, store):
     lines.append("**Checks**")
     for r in items:
         lines.append("%s %s `%s`: %s" % (ICON[r["level"]], LABELS[r["kind"]], r["id"], r["text"]))
+        lines.extend(_typo_lines(r))
     if cross:
         lines.append("")
         lines.append("**Cross-checks**")
