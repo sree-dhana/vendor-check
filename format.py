@@ -15,8 +15,10 @@ from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, t
 from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract, summarize
 from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
+import cases
 import countries
 import detect
+import workflow
 from iban import check_iban
 import onboarding
 import vendors
@@ -62,6 +64,27 @@ START_WORDS = {"start", "setup", "/start", "get started"}
 SETTINGS_RE = re.compile(r"^settings?(?:\s+(.+))?$", re.I)
 RULES_RE = re.compile(r"^(?:rules|country rules|rules for)\s+(.+)$", re.I)
 EMAIL_CMD_RE = re.compile(r"^(?:check\s+)?e-?mail\s*:?\s*\n?(.+)$", re.I | re.S)
+CASE_ID = r"(C[A-Za-z0-9]{5})"
+MY_CASES = {"my cases", "cases", "open cases", "all cases"}
+CASE_RE = re.compile(r"^case\s+%s$" % CASE_ID, re.I)
+APPROVE_RE = re.compile(r"^approve\s+%s(?:\s+(\S+))?$" % CASE_ID, re.I)
+REJECT_RE = re.compile(r"^reject\s+%s$" % CASE_ID, re.I)
+CALLBACK_RE = re.compile(r"^(confirmed|not confirmed|no answer)(?:\s+%s)?$" % CASE_ID, re.I)
+CANCEL_CALL_RE = re.compile(r"^(?:i'?ll call|i will call|cancel call|call myself)\s+%s$" % CASE_ID, re.I)
+STATE_TEXT = {
+    "ON_HOLD": "payment on hold", "CALL_SCHEDULED": "automated call scheduled", "CALLING": "calling the vendor",
+    "CALL_DONE": "call finished", "NO_ANSWER": "the vendor didn't answer", "CALL_FAILED": "the call failed",
+    "HUMAN_CALLBACK": "waiting for you to call the vendor", "AWAITING_USER": "waiting for your decision",
+    "APPROVED": "approved", "REJECTED": "rejected", "EXPIRED": "expired, nothing changed", "RECEIVED": "received",
+}
+FLAG_SHORT = {
+    "lookalike_domain": "the sender's domain only looks like the vendor's",
+    "reply_to_mismatch": "replies would go to a different address",
+    "unknown_sender": "sent from an address you didn't save for this vendor",
+    "bank_change": "says the bank details changed", "urgency": "pushes you to pay quickly",
+    "no_callback": "discourages a phone call", "send_to_account": "asks you to pay into a specific account",
+    "personal_account": "mentions a personal account", "different_payee": "mentions a different payee name",
+}
 EMAIL_MAX_CHARS = 8000
 
 # ASI:One prefixes messages with the agent mention, e.g. "@agent1q... help" or "@vendor-check help".
@@ -300,13 +323,149 @@ def _email_reply(res):
                                                    _show(c["field"], c["new"])) for c in case["changes"])
         lines.extend(["", "**Case `%s` opened. The payment is ON HOLD** until you decide. Your saved "
                           "details stay as they are unless you approve." % case["id"]])
-        if vendor.get("phone"):
-            lines.append("Before deciding, call %s on the number you saved: `%s`. Never use a number "
-                         "from this email." % (vendor["name"], vendor["phone"]))
-        else:
-            lines.append("You have no saved phone for %s. Call them on a number from your own records, "
-                         "never one from this email." % vendor["name"])
+        lines.extend([""] + _next_step_lines(case, vendor))
     return "\n".join(lines)
+
+
+def _change_list(case):
+    label = dict(vendors.FIELD_LABELS, legal_name="Legal name")
+    return ["- %s: was `%s`, now `%s`" % (label.get(c["field"], c["field"]), _show(c["field"], c["old"]),
+                                         _show(c["field"], c["new"])) for c in case["changes"]]
+
+
+def _next_step_lines(case, vendor):
+    cid, state = case["id"], case["state"]
+    if state == cases.ON_HOLD and case.get("call_after"):
+        return ["An automated verification call to the saved number is planned in about %d minutes. "
+                "To phone them yourself instead, say `I'll call %s`." % (workflow.cancel_window_min(), cid)]
+    if state in (cases.CALL_SCHEDULED, cases.CALLING):
+        return ["An automated verification call is in progress. I'll report back."]
+    if state == cases.HUMAN_CALLBACK:
+        return workflow.callback_script(case, vendor)
+    if state == cases.AWAITING_USER:
+        lines = []
+        if case.get("outcome") == "VENDOR_DENIED":
+            lines.append("The vendor said they did not send this. I suggest `reject %s`, not paying to "
+                         "the new details, and reporting the email to your bank." % cid)
+        elif case.get("outcome") == "NO_ANSWER":
+            lines.append("Nobody answered, so nothing is confirmed. Don't approve until you've reached "
+                         "them; then reply `confirmed %s` or `not confirmed %s`." % (cid, cid))
+        lines.append("To approve, quote the case id and %s: `approve %s %s`. To keep your saved details, "
+                     "say `reject %s`." % (cases.confirm_label(case), cid, cases.confirm_code(case), cid))
+        return lines
+    return []
+
+
+def _case_report(store, owner, case):
+    vendor = workflow.vendor_for(store, owner, case)
+    lines = ["**Case `%s`: %s** (%s)" % (case["id"], case["vendor_name"], STATE_TEXT[case["state"]]), ""]
+    lines.extend(["**Proposed changes**", ""] + _change_list(case))
+    if case["flags"]:
+        lines.extend(["", "**Why it was flagged:** %s." % "; ".join(FLAG_SHORT.get(f, f) for f in case["flags"])])
+    outcome = workflow.outcome_line(case)
+    if outcome:
+        lines.extend(["", "**Call result:** %s" % outcome])
+    if case.get("summary"):
+        lines.extend(["", "**Summary:** %s" % case["summary"]])
+    if case.get("decision"):
+        lines.extend(["", "**Your decision:** %s." % case["decision"]["decision"]])
+    nxt = _next_step_lines(case, vendor)
+    if nxt:
+        lines.extend([""] + nxt)
+    return "\n".join(lines)
+
+
+def _case_command(t, low, store, sender, now):
+    """Case commands. Returns a reply, or None if `t` is not one."""
+    if low in MY_CASES or CASE_RE.match(t) or APPROVE_RE.match(t) or REJECT_RE.match(t) \
+            or CALLBACK_RE.match(t) or CANCEL_CALL_RE.match(t):
+        notices = workflow.tick(store, sender, now)
+    else:
+        return None
+    pre = ["\n".join(notices), ""] if notices else []
+
+    if low in MY_CASES:
+        open_cases = cases.list_cases(store, sender, open_only=low != "all cases")
+        if not open_cases:
+            return "\n".join(pre + ["You have no open cases."])
+        lines = pre + ["**Your %scases** (%d)" % ("" if low == "all cases" else "open ", len(open_cases)), ""]
+        lines.extend("- `%s` %s: %s" % (c["id"], c["vendor_name"], STATE_TEXT[c["state"]]) for c in open_cases)
+        lines.extend(["", "Say `case <id>` for details."])
+        return "\n".join(lines)
+
+    m = CASE_RE.match(t)
+    if m:
+        case = cases.get_case(store, sender, m.group(1))
+        return "\n".join(pre + [_case_report(store, sender, case) if case else "I don't have a case `%s`." % m.group(1).upper()])
+
+    m = CANCEL_CALL_RE.match(t)
+    if m:
+        status, case = workflow.cancel_call(store, sender, m.group(1), now)
+        if status == "not_found":
+            return "I don't have a case `%s`." % m.group(1).upper()
+        if status == "too_late":
+            return "Case `%s` is already past that point (%s)." % (case["id"], STATE_TEXT[case["state"]])
+        return "\n".join(["OK, no automated call."] + [""] + workflow.callback_script(case, workflow.vendor_for(store, sender, case)))
+
+    m = CALLBACK_RE.match(t)
+    if m:
+        answer, cid = m.group(1).lower(), m.group(2)
+        if not cid:
+            waiting = [c for c in cases.list_cases(store, sender) if c["state"] == cases.HUMAN_CALLBACK]
+            if len(waiting) != 1:
+                return ("Which case? Say `%s <case id>`. Your cases waiting for a call: %s."
+                        % (answer, ", ".join("`%s`" % c["id"] for c in waiting) or "none"))
+            cid = waiting[0]["id"]
+        status, case = workflow.record_callback(store, sender, cid, answer, now)
+        if status == "not_found":
+            return "I don't have a case `%s`." % cid.upper()
+        if status == "wrong_state":
+            return "Case `%s` isn't waiting for a call result (%s)." % (case["id"], STATE_TEXT[case["state"]])
+        return "Noted.\n\n" + _case_report(store, sender, case)
+
+    m = APPROVE_RE.match(t)
+    if m:
+        cid, code = m.group(1).upper(), m.group(2)
+        case = cases.get_case(store, sender, cid)
+        if case and not code:
+            return "To approve, quote the case id and %s: `approve %s <code>`." % (cases.confirm_label(case), cid)
+        status, case = cases.approve(store, sender, cid, code, now)
+        if status == "not_found":
+            return "I don't have a case `%s`." % cid
+        if status == "approved":
+            return ("✅ **Approved case `%s`.** I've updated the saved details for **%s**:\n\n%s\n\nThis was your "
+                    "decision; the checks and any call were evidence, not proof."
+                    % (cid, case["vendor_name"], "\n".join(_change_list(case))))
+        if status == "already_approved":
+            return "Case `%s` is already approved. Nothing more to do." % cid
+        if status == "wrong_code":
+            left = cases.MAX_FAILED_APPROVALS - case["failed_approvals"]
+            return ("That code doesn't match, so nothing changed. Quote %s. %d attempt%s left."
+                    % (cases.confirm_label(case), left, "" if left == 1 else "s"))
+        if status == "locked":
+            return ("Too many wrong codes for case `%s`, so approval is locked. Say `reject %s` and ask the "
+                    "vendor to resend their details." % (cid, cid))
+        if status == "not_ready":
+            return "Case `%s` isn't ready to approve yet.\n\n%s" % (cid, "\n".join(_next_step_lines(case, workflow.vendor_for(store, sender, case))))
+        return "Case `%s` is closed (%s)." % (cid, STATE_TEXT[case["state"]])
+
+    m = REJECT_RE.match(t)
+    if m:
+        cid = m.group(1).upper()
+        status, case = cases.reject(store, sender, cid, now)
+        if status == "not_found":
+            return "I don't have a case `%s`." % cid
+        if status == "already_rejected":
+            return "Case `%s` is already rejected." % cid
+        if status == "closed":
+            return "Case `%s` is closed (%s)." % (cid, STATE_TEXT[case["state"]])
+        lines = ["**Rejected case `%s`.** Your saved details for **%s** stay as they were. Don't pay to the "
+                 "details in that message." % (cid, case["vendor_name"])]
+        if case.get("outcome") == "VENDOR_DENIED" or set(case["flags"]) & {"lookalike_domain", "unknown_sender", "reply_to_mismatch"}:
+            lines.extend(["", "Consider reporting the email to your bank and your email provider as "
+                              "suspected fraud, and don't reply to it."])
+        return "\n".join(lines)
+    return None
 
 
 def first_contact(store, sender, now=None):
@@ -354,6 +513,9 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if low == "selftest":
         return _selftest(store)
 
+    reply = _case_command(t, low, store, sender, now)
+    if reply is not None:
+        return reply
     reply = _vendor_command(t, low, store, sender, now)
     if reply is not None:
         return reply

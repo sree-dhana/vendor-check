@@ -11,8 +11,8 @@ import re
 import time
 from email.utils import parseaddr
 
-import cases
 import vendors
+import workflow
 from checks import extract_ids
 from flags import detect_flags
 
@@ -233,9 +233,9 @@ def process_email(store, owner, raw=None, parsed=None, now=None):
         result["status"] = "no_change"
         return result
     flags = [f for f, _ in result["sender_flags"]] + result["wording_flags"]
-    result["case"] = cases.open_case(store, owner, vendor, changes,
-                                     trigger={"type": "email", "ref": parsed["message_id"]},
-                                     flags=flags, now=now)
+    result["case"], result["route"], result["route_reason"] = workflow.open_and_route(
+        store, owner, vendor, changes, trigger={"type": "email", "ref": parsed["message_id"]},
+        flags=flags, now=now)
     result["status"] = "case_opened"
     return result
 

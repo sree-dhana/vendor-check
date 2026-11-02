@@ -15,12 +15,13 @@ from uagents_core.contrib.protocols.chat import (
 
 from format import first_contact, reply_for_text
 from llm import PROVIDERS, load_config
+import workflow
 
 load_dotenv()
 
 SEED = os.environ.get("AGENT_SEED")
 if not SEED:
-    raise SystemExit("AGENT_SEED is not set. Copy .env.example to .env and set it.")
+    raise SystemExit("AGENT_SEED is not set")
 
 LLM = load_config()
 
@@ -46,7 +47,6 @@ def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
     return ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(), content=content)
 
 
-# Runs locally; Agentverse is used only as a mailbox so ASI:One can reach it.
 agent = Agent(
     name=os.environ.get("AGENT_NAME", "vendor-check"),
     seed=SEED,
@@ -105,6 +105,20 @@ async def report_llm(ctx: Context):
             )
         else:
             ctx.logger.info("LLM: off (set LLM_PROVIDER and LLM_API_KEY in .env to enable)")
+
+
+@agent.on_interval(period=300.0)
+async def case_tick(ctx: Context):
+    """Every 5 minutes: expire old cases, move cases past their cancel window on, and send
+    reminders for cases waiting on the user. Whether ASI:One shows these unprompted messages
+    is still to be tested."""
+    store = Store(ctx.storage)
+    for owner in workflow.owners(store):
+        try:
+            for message in workflow.tick(store, owner):
+                await ctx.send(owner, create_text_chat(message))
+        except Exception:
+            ctx.logger.exception("case tick failed")  # no message text or IDs logged
 
 
 if __name__ == "__main__":

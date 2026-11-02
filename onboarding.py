@@ -44,7 +44,8 @@ YES = {"yes", "y", "ok", "okay", "sure", "agree", "i agree", "continue", "yes pl
 NO = {"no", "n", "nope", "stop", "nahi"}
 SKIP = {"skip", "later", "not now"}
 CANCEL = {"cancel", "stop setup", "quit setup", "exit setup"}
-PASS_THROUGH = {"help", "sample", "samples", "example", "examples", "selftest", "my vendors"}
+PASS_THROUGH = {"help", "sample", "samples", "example", "examples", "selftest", "my vendors",
+                "my cases", "cases"}
 ROLES = {
     "pay": ("pay", "pay vendors", "i pay vendors", "buyer", "vendors", "1"),
     "get_paid": ("get paid", "paid", "get paid by customers", "seller", "customers", "2"),

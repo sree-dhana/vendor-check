@@ -34,6 +34,7 @@ TRANSITIONS = {
 }
 
 MAX_CALL_ATTEMPTS = 3  # the first call plus up to 2 retries
+MAX_FAILED_APPROVALS = 5
 MAX_CASES = 100
 ID_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
 
@@ -189,7 +190,8 @@ def record_call_attempt(store, owner, case_id, status, now=None):
 
 def approve(store, owner, case_id, code, now=None):
     """User approval. Returns (status, case): 'approved', 'already_approved', 'wrong_code',
-    'not_ready', 'closed' or 'not_found'. Only an approved case changes the vendor record."""
+    'locked' (too many wrong codes), 'not_ready', 'closed' or 'not_found'. Only an approved
+    case changes the vendor record."""
     now = time.time() if now is None else now
     data = _load(store, owner)
     case = data.get((case_id or "").upper())
@@ -201,6 +203,8 @@ def approve(store, owner, case_id, code, now=None):
         return "closed", case
     if case["state"] != AWAITING_USER:
         return "not_ready", case
+    if case["failed_approvals"] >= MAX_FAILED_APPROVALS:
+        return "locked", case
     if (code or "").strip().upper() != confirm_code(case):
         case["failed_approvals"] += 1
         _log(case, case["state"], case["state"], "user", "approval failed: wrong code", now)

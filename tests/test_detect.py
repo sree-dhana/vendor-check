@@ -72,7 +72,8 @@ def test_bank_change_from_saved_sender_opens_case(store):
     res = _process(store, "bank_change")
     assert res["status"] == "case_opened" and res["matched_by"] == "sender"
     case = res["case"]
-    assert case["state"] == cases.ON_HOLD
+    # held, then routed to the human callback because automated calls are off by default
+    assert [a["to"] for a in case["audit"]] == [cases.RECEIVED, cases.ON_HOLD, cases.HUMAN_CALLBACK]
     assert {c["field"] for c in case["changes"]} == {"ifsc", "acct_last4"}
     assert "bank_change" in case["flags"] and "urgency" in case["flags"] and case["priority"] == "high"
     assert case["trigger"] == {"type": "email", "ref": "<bank-change-1@sharmatraders.in>"}
@@ -141,7 +142,7 @@ def test_bank_detail_not_on_file_opens_case():
 def test_injection_changes_nothing(store):
     res = _process(store, "injection")
     case = res["case"]
-    assert case["state"] == cases.ON_HOLD and case["decision"] is None
+    assert case["state"] == cases.HUMAN_CALLBACK and case["decision"] is None
     assert vendors.get_vendor(store, "me", "Sharma Traders")["ifsc"] == "YESB0DNB002"
     out = fmt._email_reply(res)
     assert not contains_banned(out)
@@ -163,7 +164,8 @@ def test_check_email_command(store):
     assert "- IFSC: was `YESB•••••02`, now `SBIN•••••01`" in out
     assert "- Account: was `••••7890`, now `••••2222`" in out
     assert "opened. The payment is ON HOLD**" in out
-    assert "call Sharma Traders on the number you saved: `+919876543210`" in out
+    assert "**Call Sharma Traders yourself**" in out
+    assert "Use the number you saved: `+919876543210`" in out
     assert not contains_banned(out)
 
 
