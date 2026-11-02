@@ -52,8 +52,9 @@ def heads_up_lines(labels):
     if not labels:
         return []
     lines = ["**Heads-up**"]
-    lines.extend("⚠️ %s" % FLAG_TEXT[label] for label in labels)
-    lines.append(CALLBACK_ADVICE)
+    lines.append("")
+    lines.extend("- ⚠️ %s" % FLAG_TEXT[label] for label in labels)
+    lines.extend(["", CALLBACK_ADVICE])
     return lines
 
 

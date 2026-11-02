@@ -50,7 +50,7 @@ def test_too_many_candidates_shows_none(monkeypatch):
 def test_reply_shows_suggestion_under_the_failed_line(no_net):
     out = fmt.reply_for_text("GSTIN 27AAPFU0939F1ZX", MemStore())
     lines = out.splitlines()
-    i = next(n for n, line in enumerate(lines) if line.startswith("❌ GSTIN"))
+    i = next(n for n, line in enumerate(lines) if line.startswith("- ❌ GSTIN"))
     assert "Possible typo fixes, confirm with the vendor" in lines[i + 1]
     assert REAL in lines[i + 1]
     assert "the correct GSTIN" not in out

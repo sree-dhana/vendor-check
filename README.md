@@ -37,7 +37,7 @@ Talk to it on ASI:One as **@vendor-check** (agent address `agent1qfgjfnaffngvss4
 | `save vendor <name>` | Saves the IDs from the same message, or from your last check (within 30 minutes) |
 | `check <name>` | Re-checks a saved vendor; add new IDs to compare them with what you saved |
 | `my vendors` | Lists your saved vendors |
-| `forget <name>` / `forget all` | Deletes one saved vendor / everything stored for you |
+| `forget <name>` / `forget all` | Deletes one saved vendor / all your saved vendors and recent checks |
 | `details <n>` | Full check of vendor *n* from your last batch |
 | `help`, `sample` | Examples |
 
@@ -52,13 +52,13 @@ The AI model never decides a result. Every pass, warning and problem comes from 
 These are format, checksum and consistency checks. They don't prove identity, confirm that a GSTIN is active, or show that a payment carries no risk. Always check the GSTIN on gst.gov.in and call the vendor on a number you already have.
 
 ## Privacy
-- **Messages are not logged or stored.**
+- **Messages are not logged or stored** by VendorCheck. They reach it through ASI:One and the Agentverse mailbox, whose own privacy policies apply.
 - **AI model (ASI:One):** when the built-in parser can't read a message, up to its first 500 characters are sent to ASI:One so it can read the IDs. If the optional wording labels are switched on, a payment-related message the rules found nothing in is also sent. The optional summary sends only the check results, never your message.
-- **Public lookups:** IFSC codes are looked up at ifsc.razorpay.com and PIN codes at postalpincode.in. Only the code itself is sent. Results are cached (up to 150 of each).
+- **Public lookups:** IFSC codes are looked up at ifsc.razorpay.com and PIN codes at postalpincode.in. Only the code itself is sent. Results are cached (up to 150 of each). If the main PIN service is down, a backup service is tried over plain HTTP.
 - **Saved vendors** are stored only when you say `save vendor`. They hold a name, GSTIN, PAN, IFSC and the last 4 digits of an account number (never the full number). `forget <name>` or `forget all` deletes them.
 - **Short-lived memory:** the IDs from your most recent check, and the vendor names and IDs from your most recent batch, are kept for 30 minutes so `save vendor` and `details` work. `forget all` deletes them.
-- **Rate limiting** stores message times per sender address (up to 20 messages per 10 minutes, 5 AI calls per hour).
-- Everything is stored by the agent on the machine it runs on, separately for each sender.
+- **Rate limiting** stores message times per sender address (up to 20 messages per 10 minutes, 5 AI calls per hour). These expire within an hour and are not removed by `forget all`.
+- Everything is stored by the agent in a local file on the machine it runs on (not encrypted), separately for each sender address.
 
 ## Limits
 Messages up to 1,000 characters (the AI model sees at most 500). Up to 3 IDs of each type per check, 5 vendors per batch, 50 saved vendors per person.
@@ -99,4 +99,4 @@ The log prints an **Agent inspector** link. Open it, click **Connect** and choos
 | `limits.py` | Message length and rate limits |
 | `lookups.py` | IFSC and PIN lookups (the only network code besides `llm.py`) |
 | `llm.py` | AI model client, ID reading, wording labels and summary, with validation |
-| `tests/` | 138 tests with mocked network and a fake AI model |
+| `tests/` | 139 tests with mocked network and a fake AI model |

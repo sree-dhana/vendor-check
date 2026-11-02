@@ -91,7 +91,7 @@ def test_forget_removes_data(fake_net):
     _say(store, "save vendor B GSTIN %s" % GST)
     assert _say(store, "forget a") == "Deleted **a**."
     assert vendors.get_vendor(store, "alice", "A") is None
-    assert "Deleted 1 saved vendor and your recent check." == _say(store, "forget all")
+    assert "Deleted 1 saved vendor, your recent check and your setup answers." == _say(store, "forget all")
     assert vendors.list_vendors(store, "alice") == []
     assert vendors.last_ids(store, "alice", 1000) == {}
     assert "I didn't find any IDs" in _say(store, "save vendor C")

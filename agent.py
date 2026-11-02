@@ -13,7 +13,7 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-from format import reply_for_text, HELP_TEXT
+from format import first_contact, reply_for_text
 from llm import PROVIDERS, load_config
 
 load_dotenv()
@@ -66,7 +66,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     text = msg.text()
     if not text:
         if any(isinstance(c, StartSessionContent) for c in msg.content):
-            await ctx.send(sender, create_text_chat(HELP_TEXT))
+            await ctx.send(sender, create_text_chat(first_contact(Store(ctx.storage), sender)))
         return
 
     try:

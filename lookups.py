@@ -98,6 +98,51 @@ def _parse_pin_payload(j):
     return "unavailable", None
 
 
+def _yn(v):
+    return "yes" if v else "no"
+
+
+def ifsc_result(code, store):
+    """Check result for an IFSC: pass with the branch, fail if not found, warn if the
+    lookup service did not respond."""
+    lk = lookup_ifsc(code, store)
+    r = {"kind": "ifsc", "id": code}
+    if lk["status"] == "ok":
+        d = lk["data"]
+        place = ", ".join([x for x in (d["city"], d["state"]) if x])
+        r["level"] = "pass"
+        r["state"] = d["state"]
+        r["bank"] = d["bank"]
+        r["text"] = "%s, %s (%s). NEFT %s, RTGS %s, IMPS %s, UPI %s." % (
+            d["bank"], d["branch"], place,
+            _yn(d["neft"]), _yn(d["rtgs"]), _yn(d["imps"]), _yn(d["upi"]),
+        )
+    elif lk["status"] == "not_found":
+        r["level"] = "fail"
+        r["text"] = "well-formed, but no bank branch with this code was found."
+    else:
+        r["level"] = "warn"
+        r["text"] = "format is valid, but the lookup service didn't respond, so I couldn't confirm the branch."
+    return r
+
+
+def pin_result(pin, store):
+    lk = lookup_pin(pin, store)
+    r = {"kind": "pin", "id": pin}
+    if lk["status"] == "ok":
+        d = lk["data"]
+        r["level"] = "pass"
+        r["state"] = d["state"]
+        r["text"] = "%s, %s." % (d["district"], d["state"])
+    elif lk["status"] == "not_found":
+        r["level"] = "fail"
+        r["text"] = "well-formed, but no area with this PIN code was found."
+    else:
+        r["level"] = "warn"
+        r["text"] = "format is valid, but the lookup service didn't respond, so I couldn't confirm the area."
+    return r
+
+
 def lookup_pin(pin, store):
     hit = _cache_get(store, "pin_cache", pin)
     if hit:

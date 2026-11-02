@@ -13,8 +13,9 @@ from checks import (
 from flags import detect_flags, heads_up_lines
 from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, too_long
 from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract, summarize
-from lookups import lookup_ifsc, lookup_pin
+from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
+import onboarding
 import vendors
 
 ICON = {"pass": "✅", "warn": "⚠️", "fail": "❌"}
@@ -33,7 +34,8 @@ HELP_TEXT = (
     "- `Which bank is IFSC %s?`\n"
     "- `pincode 560001`\n\n"
     "Write each ID without spaces. Say `sample` for a ready-to-copy example.\n"
-    "I check format, checksum and consistency. I can't prove identity or that a GSTIN is active."
+    "I check format, checksum and consistency. I can't prove identity or that a GSTIN is active.\n\n"
+    "New here? Say `start` to set up your business and vendors."
 ) % (SAMPLE_GSTIN, SAMPLE_PAN, SAMPLE_IFSC, SAMPLE_GSTIN, SAMPLE_IFSC)
 
 SAMPLE_TEXT = (
@@ -52,7 +54,9 @@ DISCLAIMER = (
     "registration status, or that a payment carries no risk._"
 )
 
-GREETINGS = {"hi", "hii", "hello", "hey", "help", "start", "menu", "?", "namaste"}
+GREETINGS = {"hi", "hii", "hello", "hey", "help", "menu", "?", "namaste"}
+START_WORDS = {"start", "setup", "/start", "get started"}
+SETTINGS_RE = re.compile(r"^settings?(?:\s+(.+))?$", re.I)
 
 # ASI:One prefixes messages with the agent mention, e.g. "@agent1q... help" or "@vendor-check help".
 LEADING_MENTIONS = re.compile(r"^(?:\s*@\S+)+")
@@ -69,55 +73,12 @@ PIECE_SPLIT = re.compile(r"[;\n]")
 BULLET = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s*")
 
 
-def _yn(v):
-    return "yes" if v else "no"
-
-
-def _ifsc_result(code, store):
-    lk = lookup_ifsc(code, store)
-    r = {"kind": "ifsc", "id": code}
-    if lk["status"] == "ok":
-        d = lk["data"]
-        place = ", ".join([x for x in (d["city"], d["state"]) if x])
-        r["level"] = "pass"
-        r["state"] = d["state"]
-        r["bank"] = d["bank"]
-        r["text"] = "%s, %s (%s). NEFT %s, RTGS %s, IMPS %s, UPI %s." % (
-            d["bank"], d["branch"], place,
-            _yn(d["neft"]), _yn(d["rtgs"]), _yn(d["imps"]), _yn(d["upi"]),
-        )
-    elif lk["status"] == "not_found":
-        r["level"] = "fail"
-        r["text"] = "well-formed, but no bank branch with this code was found."
-    else:
-        r["level"] = "warn"
-        r["text"] = "format is valid, but the lookup service didn't respond, so I couldn't confirm the branch."
-    return r
-
-
-def _pin_result(pin, store):
-    lk = lookup_pin(pin, store)
-    r = {"kind": "pin", "id": pin}
-    if lk["status"] == "ok":
-        d = lk["data"]
-        r["level"] = "pass"
-        r["state"] = d["state"]
-        r["text"] = "%s, %s." % (d["district"], d["state"])
-    elif lk["status"] == "not_found":
-        r["level"] = "fail"
-        r["text"] = "well-formed, but no area with this PIN code was found."
-    else:
-        r["level"] = "warn"
-        r["text"] = "format is valid, but the lookup service didn't respond, so I couldn't confirm the area."
-    return r
-
-
 def _typo_lines(r):
     if r.get("fixes"):
-        return ["    ↳ Possible typo fixes, confirm with the vendor: %s"
+        return ["  - ↳ Possible typo fixes, confirm with the vendor: %s"
                 % ", ".join("`%s`" % f for f in r["fixes"])]
     if r.get("too_many_fixes"):
-        return ["    ↳ Several valid GSTINs are one typo away, too many to guess. Ask the vendor to resend it."]
+        return ["  - ↳ Several valid GSTINs are one typo away, too many to guess. Ask the vendor to resend it."]
     return []
 
 
@@ -180,7 +141,8 @@ def _vendor_command(t, low, store, sender, now):
             return "Say `forget <name>` to delete one saved vendor, or `forget all` to delete everything."
         if arg.lower() == "all":
             n = vendors.forget_all(store, sender)
-            return "Deleted %d saved vendor%s and your recent check." % (n, "" if n == 1 else "s")
+            return ("Deleted %d saved vendor%s, your recent check and your setup answers."
+                    % (n, "" if n == 1 else "s"))
         if vendors.forget(store, sender, arg):
             return "Deleted **%s**." % vendors.clean_name(arg)
         return ("I don't have a saved vendor called **%s**. Say `my vendors` to see the list."
@@ -189,9 +151,10 @@ def _vendor_command(t, low, store, sender, now):
 
 
 def _change_lines(name, changed):
-    lines = ["❌ **Bank details changed since you saved %s**" % name]
+    lines = ["❌ **Bank details changed since you saved %s**" % name, ""]
     for f, old, new in changed:
         lines.append("- %s: was `%s`, now `%s`" % (vendors.FIELD_LABELS[f], vendors.mask(f, old), vendors.mask(f, new)))
+    lines.append("")
     lines.append(
         "Call the vendor on a number you already have before paying. If the change is genuine, "
         "say `save vendor %s` with the new details to update it." % name
@@ -207,6 +170,13 @@ def _llm_read_line(llm_read, provider_name):
             "Check they match what you sent._" % (who, provider_name, ids))
 
 
+def first_contact(store, sender, now=None):
+    """Reply to a new chat session: setup for a new user, help for a returning one."""
+    if onboarding.has_profile(store, sender):
+        return HELP_TEXT
+    return onboarding.begin(store, sender, now)
+
+
 def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
@@ -214,6 +184,21 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if too_long(t):
         return TOO_LONG_TEXT % len(t)
     low = t.lower()
+
+    if low in START_WORDS:
+        return onboarding.begin(store, sender, now)
+    m = SETTINGS_RE.match(t)
+    if m:
+        if m.group(1):
+            return onboarding.edit(store, sender, m.group(1))
+        return onboarding.settings_reply(store, sender)
+    if onboarding.is_active(store, sender):
+        def save_for_setup(txt):
+            r = _vendor_command(txt, txt.lower(), store, sender, now) or ""
+            return r.startswith(("Saved", "Updated")), r
+        reply = onboarding.handle(t, store, sender, save_for_setup)
+        if reply is not None:
+            return reply
 
     if low == "selftest":
         return _selftest(store)
@@ -259,6 +244,8 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
             new = [(k, v) for k in ("gstin", "pan", "ifsc", "pin") for v in res[k] if v not in found[k]]
             for k, v in new:
                 found[k].append(v)
+                # a glued fragment like "YESB0DNB002BRANCH" is not a separate problem once read
+                bad[k] = [b for b in bad[k] if v not in b]
             if new:
                 llm_read = (new, res["vendor_name"])
                 nothing = False
@@ -332,11 +319,11 @@ def _evaluate(found, bad, store, vendor=None, changed=(), same=()):
         pans_ok.append(p)
         items.append(r)
     for c in found["ifsc"][:MAX_PER_TYPE]:
-        r = _ifsc_result(c, store)
+        r = ifsc_result(c, store)
         ifsc_res.append(r)
         items.append(r)
     for n in found["pin"][:MAX_PER_TYPE]:
-        r = _pin_result(n, store)
+        r = pin_result(n, store)
         pin_res.append(r)
         items.append(r)
     for kind in bad:
@@ -368,10 +355,12 @@ def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
         "**%d passed%s%d to confirm%s%d problem%s**"
         % (counts["pass"], DOT, counts["warn"], DOT, counts["fail"], "" if counts["fail"] == 1 else "s")
     )
+    # ASI:One renders Markdown and joins lines separated by a single newline, so every
+    # block below is a separate paragraph or a bullet list.
     if counts["fail"]:
-        lines.append("Resolve the problems before paying.")
+        lines.extend(["", "Resolve the problems before paying."])
     elif not counts["warn"]:
-        lines.append("No problems found in these checks.")
+        lines.extend(["", "No problems found in these checks."])
     if llm_read:
         lines.append("")
         lines.append(_llm_read_line(llm_read, provider_name))
@@ -386,14 +375,14 @@ def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
         lines.append("**Checks** (the details you saved for %s)" % vendor["name"])
     else:
         lines.append("**Checks**")
+    lines.append("")
     for r in items:
-        lines.append("%s %s `%s`: %s" % (ICON[r["level"]], LABELS[r["kind"]], r["id"], r["text"]))
+        lines.append("- %s %s `%s`: %s" % (ICON[r["level"]], LABELS[r["kind"]], r["id"], r["text"]))
         lines.extend(_typo_lines(r))
     if cross:
-        lines.append("")
-        lines.append("**Cross-checks**")
+        lines.extend(["", "**Cross-checks**", ""])
         for r in cross:
-            lines.append("%s %s" % (ICON[r["level"]], r["text"]))
+            lines.append("- %s %s" % (ICON[r["level"]], r["text"]))
 
     lines.extend(_before_you_pay(bool(ev["gst_res"])))
     for n in notes:
@@ -409,7 +398,7 @@ def _check_reply(ev, flag_labels=(), vendor=None, changed=(), from_saved=False,
 
 
 def _before_you_pay(has_gstin):
-    lines = ["", "**Before you pay**"]
+    lines = ["", "**Before you pay**", ""]
     if has_gstin:
         lines.append("- Confirm the GSTIN is active on the official GST portal (gst.gov.in).")
     lines.append("- Call the vendor on a number you already have, not one from the invoice or message.")

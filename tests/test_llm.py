@@ -133,6 +133,16 @@ def test_long_message_with_unread_keyword_calls_llm(fake_net):
     assert "IFSC `SBIN0000001`" in out
 
 
+def test_glued_fragment_is_replaced_by_the_id_read_from_it(fake_net):
+    text = ("TAX INVOICE from Sharma Traders, Pune. " + "Thank you for your business this quarter. " * 6
+            + "GSTIN %s. IFSC YESB0DNB002Branch Pune, A/c 1234567890." % GST)
+    assert fmt.extract_ids(text)[1]["ifsc"] == ["YESB0DNB002BRANCH"]
+    out = _say(text, FakeClient(dict(EMPTY, ifsc=["YESB0DNB002"])))
+    assert "✅ IFSC `YESB0DNB002`" in out
+    assert "YESB0DNB002BRANCH" not in out
+    assert "0 problems" in out.splitlines()[0]
+
+
 def test_llm_sees_at_most_500_chars_fenced_as_data(no_net):
     client = FakeClient(dict(EMPTY))
     _say("ref 1 " + "x" * 900, client)

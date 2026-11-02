@@ -113,6 +113,7 @@ def forget_all(store, sender):
     store.set("vendors:%s" % sender, {})
     store.set("last:%s" % sender, {})
     store.set("batch:%s" % sender, {})
+    store.set("profile:%s" % sender, {})
     return n
 
 
