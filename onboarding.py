@@ -269,4 +269,6 @@ def summary(p, title="**Setup**", env=None):
             if p["monitoring"] else "no"))
     lines.append("")
     lines.append(calls_line(vendor_codes or ([country] if country else []), env))
+    lines.append("")
+    lines.append("Say `rules <country>` to see the facts each country profile uses, with sources.")
     return "\n".join(lines)

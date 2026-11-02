@@ -3,9 +3,9 @@ returns its profile, falling back to the generic profile for anything unsupporte
 import os
 import re
 
-from countries import generic, india
+from countries import eu, generic, india, uk, us
 
-PROFILES = {p.code: p for p in (india.PROFILE, generic.PROFILE)}
+PROFILES = {p.code: p for p in (india.PROFILE, uk.PROFILE, eu.PROFILE, us.PROFILE, generic.PROFILE)}
 
 # Names people type -> ISO 3166-1 alpha-2. Countries without a profile still resolve,
 # so the summary can say "uses the generic profile" instead of "unknown".
@@ -62,15 +62,37 @@ def display_name(code):
 def profile_code(code):
     if code in PROFILES:
         return code
-    if code in EU_EEA and "EU" in PROFILES:
+    if code in EU_EEA:
         return "EU"
-    if code == "GB" and "UK" in PROFILES:
-        return "UK"
     return "GENERIC"
 
 
 def get_profile(code):
     return PROFILES[profile_code(code)]
+
+
+def describe(code):
+    """Everything a profile claims, with sources, for the `rules <country>` command."""
+    p = get_profile(code)
+    name = display_name(code)
+    head = "**Rules for %s**" % name
+    if p.code not in (code, "GENERIC"):
+        head += " (uses the %s profile)" % p.name
+    lines = [head, "",
+             "- **Profile:** %s (%s), last checked %s." % (p.name, p.confidence, p.last_checked),
+             "- **What I check:** %s." % p.summary]
+    if p.lookups:
+        lines.append("- **Lookups:** %s." % ", ".join(p.lookups))
+    lines.append("- **Automated calls:** %s." % (
+        "can be enabled (demo or with consent)" if p.call_rules.calls_enabled else "not enabled"))
+    facts = list(p.payment_terms) + list(p.call_rules.notes)
+    if facts:
+        lines.extend(["", "**Facts and sources**", ""])
+        lines.extend("- %s Source: %s (checked %s)" % (f.text, f.source, f.last_checked) for f in facts)
+    if p.not_researched:
+        lines.extend(["", "**Not researched yet:** %s." % ", ".join(p.not_researched)])
+    lines.extend(["", "_This is general information, not legal or tax advice._"])
+    return "\n".join(lines)
 
 
 def calls_globally_enabled(env=None):

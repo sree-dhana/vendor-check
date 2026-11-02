@@ -82,7 +82,7 @@ def test_full_questionnaire(fake_net):
     assert out.startswith("Saved **Sharma Traders**")
     assert "**Setup done.**" in out
     assert "**You are in India.** Rules in use: India: full profile" in out
-    assert "UK: generic profile" in out and "Singapore: generic profile" in out
+    assert "UK: partial profile" in out and "Singapore: generic profile" in out
     assert "**Calls: off.**" in out
     p = onboarding.load(store, "me")
     assert (p["country"], p["role"], p["vendor_countries"], p["monitoring"], p["completed"]) == (
@@ -93,7 +93,7 @@ def test_skip_first_vendor_and_same_country(no_net):
     store = MemStore()
     _run(store, "start", "yes", "UK", "pay", "same", "no")
     out = _say(store, "skip")
-    assert "**You are in UK.** Rules in use: UK: generic profile" in out
+    assert "**You are in UK.** Rules in use: UK: partial profile" in out
     assert "**Email monitoring:** no." in out
     assert onboarding.load(store, "me")["vendor_countries"] == ["GB"]
 

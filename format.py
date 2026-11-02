@@ -15,6 +15,7 @@ from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, t
 from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract, summarize
 from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
+import countries
 import onboarding
 import vendors
 
@@ -57,6 +58,7 @@ DISCLAIMER = (
 GREETINGS = {"hi", "hii", "hello", "hey", "help", "menu", "?", "namaste"}
 START_WORDS = {"start", "setup", "/start", "get started"}
 SETTINGS_RE = re.compile(r"^settings?(?:\s+(.+))?$", re.I)
+RULES_RE = re.compile(r"^(?:rules|country rules|rules for)\s+(.+)$", re.I)
 
 # ASI:One prefixes messages with the agent mention, e.g. "@agent1q... help" or "@vendor-check help".
 LEADING_MENTIONS = re.compile(r"^(?:\s*@\S+)+")
@@ -192,6 +194,12 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
         if m.group(1):
             return onboarding.edit(store, sender, m.group(1))
         return onboarding.settings_reply(store, sender)
+    m = RULES_RE.match(t)
+    if m:
+        code = countries.resolve(m.group(1))
+        if not code:
+            return "I don't recognise that country. Try `rules India`, `rules UK`, `rules Germany` or `rules US`."
+        return countries.describe(code)
     if onboarding.is_active(store, sender):
         def save_for_setup(txt):
             r = _vendor_command(txt, txt.lower(), store, sender, now) or ""

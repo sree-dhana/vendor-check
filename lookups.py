@@ -1,3 +1,5 @@
+import re
+
 import requests
 
 IFSC_URL = "https://ifsc.razorpay.com/{}"
@@ -100,6 +102,56 @@ def _parse_pin_payload(j):
 
 def _yn(v):
     return "yes" if v else "no"
+
+
+# EU VIES VAT check. Request/response from the official spec
+# https://ec.europa.eu/assets/taxud/vow-information/swagger_publicVAT.yaml; base URL tested
+# against its own test service (vatNumber 100 -> valid, 200 -> invalid) on 2026-11-02.
+VIES_URL = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
+VIES_COUNTRY = {"GR": "EL"}  # VIES uses EL for Greece
+
+
+def lookup_vies(country, vat_number, store):
+    """Return {'status': 'valid'|'invalid'|'unavailable', 'name': str}. Outages, member-state
+    downtime, rate limits and odd responses are all 'unavailable' (could not confirm)."""
+    cc = VIES_COUNTRY.get(country, country)
+    number = re.sub(r"[\s\-.]", "", vat_number or "").upper()
+    if number[:2] in (cc, country):
+        number = number[2:]
+    key = cc + number
+    hit = _cache_get(store, "vies_cache", key)
+    if hit:
+        return hit
+    try:
+        r = requests.post(VIES_URL, json={"countryCode": cc, "vatNumber": number},
+                          timeout=TIMEOUT, headers=HEADERS)
+        j = r.json() if r.status_code == 200 else None
+    except Exception:
+        j = None
+    if not isinstance(j, dict) or not isinstance(j.get("valid"), bool):
+        return {"status": "unavailable"}
+    out = {"status": "valid" if j["valid"] else "invalid", "name": _clip(j.get("name"))}
+    if out["name"] == "---":
+        out["name"] = ""
+    _cache_put(store, "vies_cache", key, out)
+    return out
+
+
+def vies_result(country, vat_number, store):
+    lk = lookup_vies(country, vat_number, store)
+    r = {"kind": "vat", "id": vat_number}
+    if lk["status"] == "valid":
+        r["level"] = "pass"
+        r["text"] = "VIES lists this VAT number as valid%s." % (
+            " (registered name: %s)" % lk["name"] if lk.get("name") else "")
+    elif lk["status"] == "invalid":
+        r["level"] = "warn"
+        r["text"] = ("VIES does not list this VAT number as valid for EU cross-border trade. It may "
+                     "still be a domestic number; ask the vendor.")
+    else:
+        r["level"] = "warn"
+        r["text"] = "the EU VIES service didn't respond or couldn't check this country, so I couldn't confirm it."
+    return r
 
 
 def ifsc_result(code, store):
