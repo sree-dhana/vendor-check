@@ -1,0 +1,13 @@
+From: Sharma Traders <accounts@sharmatraders.in>
+To: owner@mybusiness.in
+Subject: Updated bank details
+Message-ID: <bank-change-1@sharmatraders.in>
+
+Dear customer,
+
+We have changed our bank account. Please pay today to the new account below.
+IFSC SBIN0000001
+Account number 55500011112222
+
+Regards,
+Ravi Sharma

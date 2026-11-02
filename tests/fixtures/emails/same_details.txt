@@ -1,0 +1,8 @@
+From: Sharma Traders <accounts@sharmatraders.in>
+To: owner@mybusiness.in
+Subject: Invoice 2300
+Message-ID: <same-1@sharmatraders.in>
+
+Hello,
+Invoice 2300 attached. Pay to IFSC YESB0DNB002, account 1234567890 as usual.
+GSTIN 27AAPFU0939F1ZV

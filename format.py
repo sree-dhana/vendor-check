@@ -16,6 +16,7 @@ from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, sh
 from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
 import countries
+import detect
 from iban import check_iban
 import onboarding
 import vendors
@@ -60,6 +61,8 @@ GREETINGS = {"hi", "hii", "hello", "hey", "help", "menu", "?", "namaste"}
 START_WORDS = {"start", "setup", "/start", "get started"}
 SETTINGS_RE = re.compile(r"^settings?(?:\s+(.+))?$", re.I)
 RULES_RE = re.compile(r"^(?:rules|country rules|rules for)\s+(.+)$", re.I)
+EMAIL_CMD_RE = re.compile(r"^(?:check\s+)?e-?mail\s*:?\s*\n?(.+)$", re.I | re.S)
+EMAIL_MAX_CHARS = 8000
 
 # ASI:One prefixes messages with the agent mention, e.g. "@agent1q... help" or "@vendor-check help".
 LEADING_MENTIONS = re.compile(r"^(?:\s*@\S+)+")
@@ -243,6 +246,69 @@ def _llm_read_line(llm_read, provider_name):
             "Check they match what you sent._" % (who, provider_name, ids))
 
 
+def _email_text(t):
+    """The pasted email if this message is one (`check email ...`, a forwarded email, or text
+    starting with From: and Subject: headers), else None."""
+    m = EMAIL_CMD_RE.match(t)
+    if m:
+        return m.group(1)
+    if detect.FORWARD_RE.search(t):
+        return t
+    head = [line.strip().lower() for line in t.split("\n")[:12] if line.strip()]
+    if any(h.startswith("from:") for h in head) and any(h.startswith("subject:") for h in head):
+        return t
+    return None
+
+
+def _show(field, value):
+    if value is None:
+        return "not on file"
+    if field in ("legal_name", "vat"):
+        return value
+    return vendors.mask(field, value)
+
+
+MATCHED_BY = {"sender": "a saved email address", "domain": "their saved domain",
+              "lookalike": "a lookalike domain", "ids": "IDs in the email", "name": "their name in the email"}
+
+
+def _email_reply(res):
+    """Plain report of what an email contained. The email's own words are never repeated
+    as instructions; only fixed text, IDs and masked values appear."""
+    if res["status"] == "duplicate":
+        return "I've already processed this email, so I didn't open another case."
+    who = res["email"]["from_addr"] or "an unknown sender"
+    vendor = res["vendor"]
+    if vendor is None:
+        lines = ["**Email from %s**" % who, "",
+                 "I couldn't match it to a vendor you saved, so there's nothing to compare. Save the "
+                 "vendor first, including their email address: `save vendor <name> email <address> ...`."]
+    else:
+        lines = ["**Email from %s** about **%s** (matched by %s)." % (who, vendor["name"], MATCHED_BY[res["matched_by"]])]
+    warnings = detect.sender_flag_lines(res["sender_flags"])
+    if warnings:
+        lines.extend(["", "**Sender warnings**", ""] + ["- ⚠️ %s" % w for w in warnings])
+    if res["wording_flags"]:
+        lines.extend([""] + heads_up_lines(res["wording_flags"]))
+    if res["status"] == "no_change":
+        lines.extend(["", "✅ The details in this email match what you saved for %s. No case opened." % vendor["name"]])
+    elif res["status"] == "case_opened":
+        case = res["case"]
+        label = dict(vendors.FIELD_LABELS, legal_name="Legal name")
+        lines.extend(["", "❌ **Changes compared with what you saved for %s**" % vendor["name"], ""])
+        lines.extend("- %s: was `%s`, now `%s`" % (label.get(c["field"], c["field"]), _show(c["field"], c["old"]),
+                                                   _show(c["field"], c["new"])) for c in case["changes"])
+        lines.extend(["", "**Case `%s` opened. The payment is ON HOLD** until you decide. Your saved "
+                          "details stay as they are unless you approve." % case["id"]])
+        if vendor.get("phone"):
+            lines.append("Before deciding, call %s on the number you saved: `%s`. Never use a number "
+                         "from this email." % (vendor["name"], vendor["phone"]))
+        else:
+            lines.append("You have no saved phone for %s. Call them on a number from your own records, "
+                         "never one from this email." % vendor["name"])
+    return "\n".join(lines)
+
+
 def first_contact(store, sender, now=None):
     """Reply to a new chat session: setup for a new user, help for a returning one."""
     if onboarding.has_profile(store, sender):
@@ -254,6 +320,12 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
+    email_text = _email_text(t)
+    if email_text is not None:
+        if len(t) > EMAIL_MAX_CHARS:
+            return ("That email is too long for me (%d characters). Please paste up to %d characters: "
+                    "the headers and the part about payment details." % (len(t), EMAIL_MAX_CHARS))
+        return _email_reply(detect.process_email(store, sender, raw=email_text, now=now))
     if too_long(t):
         return TOO_LONG_TEXT % len(t)
     low = t.lower()

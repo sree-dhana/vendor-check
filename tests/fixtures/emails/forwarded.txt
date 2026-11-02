@@ -1,0 +1,13 @@
+From: Owner <owner@mybusiness.in>
+To: vendorcheck-inbox@example.com
+Subject: Fwd: Change of bank
+
+Please check this one.
+
+---------- Forwarded message ---------
+From: Sharma Traders <accounts@sharmatraders.in>
+Date: Mon, 2 Nov 2026 at 10:12
+Subject: Change of bank
+To: Owner <owner@mybusiness.in>
+
+Our bank has changed. New IFSC SBIN0000001, account 55500011112222.
