@@ -170,7 +170,7 @@ def _vendor_command(t, low, store, sender, now):
             return "Say `forget <name>` to delete one saved vendor, or `forget all` to delete everything."
         if arg.lower() == "all":
             n = vendors.forget_all(store, sender)
-            return ("Deleted %d saved vendor%s, your recent check and your setup answers."
+            return ("Deleted %d saved vendor%s, your cases, your recent check and your setup answers."
                     % (n, "" if n == 1 else "s"))
         if vendors.forget(store, sender, arg):
             return "Deleted **%s**." % vendors.clean_name(arg)

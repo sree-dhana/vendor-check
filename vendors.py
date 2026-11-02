@@ -302,6 +302,43 @@ def save_vendor(store, sender, name, ids, now=None):
     return status
 
 
+def apply_changes(store, sender, vendor_id, changes, now=None):
+    """Write an approved case's changes into the vendor record. Called only by
+    cases.approve, after the user has approved with the right code."""
+    data = _vendors(store, sender)
+    for key, rec in data.items():
+        if rec["id"] != vendor_id:
+            continue
+        for c in changes:
+            if c["field"] == "acct_last4":
+                rec["acct_last4"] = c["new"]
+                if c.get("new_hash"):
+                    rec["acct_hash"] = c["new_hash"]
+                else:
+                    rec.pop("acct_hash", None)
+            else:
+                rec[c["field"]] = c["new"]
+        rec["updated_at"] = time.time() if now is None else now
+        store.set("vendors:%s" % sender, data)
+        return True
+    return False
+
+
+def account_change(store, sender, vendor_id, digits):
+    """A case change entry for a new account number, carrying only the last 4 digits and a
+    fingerprint made with this vendor's salt (so approval never needs the full number).
+    Creates and saves the vendor's salt if it has none yet."""
+    data = _vendors(store, sender)
+    rec = next((r for r in data.values() if r["id"] == vendor_id), None)
+    if rec is None:
+        return None
+    if not rec.get("acct_salt"):
+        rec["acct_salt"] = secrets.token_hex(8)
+        store.set("vendors:%s" % sender, data)
+    return {"field": "acct_last4", "old": rec.get("acct_last4"), "new": digits[-4:],
+            "new_hash": _acct_hash(rec["acct_salt"], digits)}
+
+
 def forget(store, sender, name):
     data = _vendors(store, sender)
     if data.pop(clean_name(name).casefold(), None) is None:
@@ -316,6 +353,7 @@ def forget_all(store, sender):
     store.set("last:%s" % sender, {})
     store.set("batch:%s" % sender, {})
     store.set("profile:%s" % sender, {})
+    store.set("cases:%s" % sender, {})
     return n
 
 
