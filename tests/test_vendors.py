@@ -19,8 +19,10 @@ def test_save_after_a_check_and_recall(fake_net):
     out = _say(store, "save vendor Sharma Traders")
     assert "Saved **Sharma Traders**" in out
     rec = vendors.get_vendor(store, "alice", "sharma traders")
-    assert rec == {"name": "Sharma Traders", "gstin": GST, "pan": "AAPFU0939F",
-                   "ifsc": "SBIN0000001", "acct_last4": "7890"}
+    assert {k: rec[k] for k in ("name", "gstin", "pan", "ifsc", "acct_last4", "country")} == {
+        "name": "Sharma Traders", "gstin": GST, "pan": "AAPFU0939F", "ifsc": "SBIN0000001",
+        "acct_last4": "7890", "country": "IN"}
+    assert rec["id"].startswith("v") and rec["consent"] == {"status": "not_requested"}
     listing = _say(store, "my vendors")
     assert "**Sharma Traders**" in listing and "••••7890" in listing
 
@@ -94,7 +96,7 @@ def test_forget_removes_data(fake_net):
     assert "Deleted 1 saved vendor, your recent check and your setup answers." == _say(store, "forget all")
     assert vendors.list_vendors(store, "alice") == []
     assert vendors.last_ids(store, "alice", 1000) == {}
-    assert "I didn't find any IDs" in _say(store, "save vendor C")
+    assert "I didn't find any details" in _say(store, "save vendor C")
 
 
 def test_caps_and_name_cleaning(fake_net):
@@ -120,7 +122,7 @@ def test_last_check_expires(fake_net):
     store = MemStore()
     _say(store, FIRST, now=1000)
     assert vendors.last_ids(store, "alice", 1000 + vendors.LAST_CHECK_TTL + 1) == {}
-    assert "I didn't find any IDs" in _say(store, "save vendor Late", now=1000 + vendors.LAST_CHECK_TTL + 1)
+    assert "I didn't find any details" in _say(store, "save vendor Late", now=1000 + vendors.LAST_CHECK_TTL + 1)
 
 
 def test_account_last4_parsing():

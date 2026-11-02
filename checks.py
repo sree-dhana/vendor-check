@@ -41,7 +41,7 @@ PAN_HOLDER_TYPES = {
     "J": "Artificial Juridical Person", "G": "Government",
 }
 
-LABELS = {"gstin": "GSTIN", "pan": "PAN", "ifsc": "IFSC", "pin": "PIN"}
+LABELS = {"gstin": "GSTIN", "pan": "PAN", "ifsc": "IFSC", "pin": "PIN", "iban": "IBAN", "vat": "VAT"}
 
 FORMAT_HELP = {
     "gstin": "15 characters: 2 digits, a 10-character PAN, 1 digit/letter, the letter Z, 1 check character",
@@ -144,9 +144,6 @@ def check_malformed(kind, token):
         "level": "fail",
         "text": "wrong format. Expected %s." % FORMAT_HELP[kind],
     }
-
-
-# ---------- cross-checks ----------
 
 def norm_state(s):
     s = (s or "").upper().replace("&", "AND")
