@@ -16,6 +16,7 @@ from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, sh
 from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
 import cases
+import consent
 import countries
 import detect
 import workflow
@@ -64,6 +65,12 @@ START_WORDS = {"start", "setup", "/start", "get started"}
 SETTINGS_RE = re.compile(r"^settings?(?:\s+(.+))?$", re.I)
 RULES_RE = re.compile(r"^(?:rules|country rules|rules for)\s+(.+)$", re.I)
 EMAIL_CMD_RE = re.compile(r"^(?:check\s+)?e-?mail\s*:?\s*\n?(.+)$", re.I | re.S)
+CONSENT_REQ_RE = re.compile(r"^(?:consent request|request consent|ask consent)\s+(?:for\s+)?(.+)$", re.I)
+CONSENT_REPLY_RE = re.compile(
+    r"^consent reply\s+(?:for\s+)?(.+?)(?:\s*\n|\s*:\s+|\s+(?=calls?\b|recording\b|from\s*:|1\s*[.)]))(.*)$",
+    re.I | re.S)
+CONFIRM_CONSENT_RE = re.compile(r"^confirm consent\s+(?:for\s+)?(.+)$", re.I)
+REVOKE_RE = re.compile(r"^(?:revoke|withdraw) consent\s+(?:for\s+)?(.+)$", re.I)
 CASE_ID = r"(C[A-Za-z0-9]{5})"
 MY_CASES = {"my cases", "cases", "open cases", "all cases"}
 CASE_RE = re.compile(r"^case\s+%s$" % CASE_ID, re.I)
@@ -145,8 +152,7 @@ def _vendor_card(rec):
         lines.append("- **Expected emails from:** %s" % ", ".join(rec.get("emails", []) + [
             "any address @" + d for d in rec.get("domains", [])
             if not any(e.endswith("@" + d) for e in rec.get("emails", []))]))
-    consent = (rec.get("consent") or {}).get("status", "not_requested").replace("_", " ")
-    lines.append("- **Consent for verification calls:** %s" % consent)
+    lines.append("- **Consent for verification calls:** %s" % consent.describe(rec.get("consent")))
     lines.append("- **Vendor id:** `%s`" % rec["id"])
     return lines
 
@@ -246,6 +252,13 @@ def _save_vendor_reply(rest, store, sender, now):
                       "spot changes, or `forget vendor %s` to delete it. I never store full account "
                       "numbers: only the last 4 digits and a one-way fingerprint used to notice if "
                       "the number changes." % (rec["name"], rec["name"], rec["name"])])
+    wants_monitoring = onboarding.load(store, sender).get("monitoring")
+    if status == "saved" and rec.get("phone") and wants_monitoring:
+        consent.mark_requested(store, sender, rec, now)
+        lines.extend(["", _consent_draft_reply(rec)])
+    elif rec.get("phone") and (rec.get("consent") or {}).get("status") == "not_requested":
+        lines.extend(["", "To allow automated verification calls later, say `consent request %s` and I'll "
+                          "draft a message for you to send them." % rec["name"]])
     return "\n".join(lines)
 
 
@@ -267,6 +280,70 @@ def _llm_read_line(llm_read, provider_name):
     who = " for **%s**" % vendor_name if vendor_name else ""
     return ("_I read these IDs from your message%s with help from an AI model (%s): %s. "
             "Check they match what you sent._" % (who, provider_name, ids))
+
+
+def _consent_command(t, store, sender, now):
+    """Consent commands. Returns a reply, or None if `t` is not one."""
+    for regex, kind in ((CONSENT_REPLY_RE, "reply"), (CONSENT_REQ_RE, "request"),
+                        (CONFIRM_CONSENT_RE, "confirm"), (REVOKE_RE, "revoke")):
+        m = regex.match(t)
+        if m:
+            break
+    else:
+        return None
+    name = vendors.clean_name(m.group(1))
+    vendor = vendors.get_vendor(store, sender, name)
+    if not vendor:
+        return "I don't have a saved vendor called **%s**. Say `my vendors` to see the list." % name
+
+    if kind == "request":
+        if not vendor.get("phone"):
+            return ("Save a phone number for **%s** first, so the request names the number we'd call: "
+                    "`save vendor %s phone +91 98765 43210`." % (vendor["name"], vendor["name"]))
+        consent.mark_requested(store, sender, vendor, now)
+        return _consent_draft_reply(vendor)
+
+    if kind == "reply":
+        status, record, warnings = consent.record_reply(store, sender, vendor, m.group(2), now)
+        lines = []
+        if status == "granted":
+            lines.append("✅ Recorded: **%s** agreed to automated verification calls to `%s`. Recording: %s."
+                         % (vendor["name"], record["phone"], "yes" if record["recording"] else "no"))
+        elif status == "declined":
+            lines.append("Recorded: **%s** declined automated calls. If their details change, you'll get "
+                         "a script to call them yourself." % vendor["name"])
+        elif status == "pending":
+            lines.append("Not accepted yet: consent for **%s** stays pending." % vendor["name"])
+        lines.extend("⚠️ %s" % w for w in warnings)
+        lines.extend(["", "Consent never makes a call result proof, and you still approve every change yourself. "
+                          "Say `revoke consent %s` at any time." % vendor["name"]])
+        return "\n".join(lines).strip()
+
+    if kind == "confirm":
+        status, record = consent.confirm(store, sender, vendor, now)
+        if status == "nothing_to_confirm":
+            return "There's no reply waiting for confirmation for **%s**." % vendor["name"]
+        if status == "no_phone":
+            return "Save a phone number for **%s** first." % vendor["name"]
+        return "Recorded after your check: consent for **%s** is now %s." % (vendor["name"], consent.describe(record))
+
+    consent.revoke(store, sender, vendor, now)
+    return ("Consent for **%s** is revoked. No automated calls will be made to them; you'll get a script "
+            "to call them yourself instead." % vendor["name"])
+
+
+def _consent_draft_reply(vendor):
+    return "\n".join([
+        "Here's a consent request for **%s**. **Send it yourself** from your usual email (or read it "
+        "out when you call them). I never contact vendors." % vendor["name"],
+        "",
+        "```",
+        consent.draft_request(vendor),
+        "```",
+        "",
+        "When they answer, paste their reply here starting with `consent reply %s` on the first line."
+        % vendor["name"],
+    ])
 
 
 def _email_text(t):
@@ -479,6 +556,10 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
+    if len(t) <= EMAIL_MAX_CHARS:
+        reply = _consent_command(t, store, sender, now)
+        if reply is not None:
+            return reply
     email_text = _email_text(t)
     if email_text is not None:
         if len(t) > EMAIL_MAX_CHARS:

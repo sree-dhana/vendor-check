@@ -279,10 +279,16 @@ def save_vendor(store, sender, name, ids, now=None):
     }
     rec["name"] = name
 
+    old_phone = rec.get("phone")
     for k in FIELDS + DETAILS:
         if k == "acct_last4" or not ids.get(k):
             continue
         rec[k] = ids[k]
+    consent = rec.get("consent") or {}
+    if old_phone and rec.get("phone") != old_phone and consent.get("status") in ("granted", "pending"):
+        # consent covers one number: a new number needs a new answer from the vendor
+        rec["consent"] = {"status": "pending", "version": consent.get("version"), "phone": rec["phone"],
+                          "note": "the saved phone changed, so ask the vendor again"}
     digits = ids.get("acct_digits")
     if digits:
         rec.setdefault("acct_salt", secrets.token_hex(8))
