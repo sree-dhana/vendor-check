@@ -19,6 +19,7 @@ import cases
 import consent
 import countries
 import detect
+import mailwatch
 import telephony
 import workflow
 from iban import check_iban
@@ -81,6 +82,9 @@ CALLBACK_RE = re.compile(r"^(confirmed|not confirmed|no answer)(?:\s+%s)?$" % CA
 CANCEL_CALL_RE = re.compile(r"^(?:i'?ll call|i will call|cancel call|call myself)\s+%s$" % CASE_ID, re.I)
 DEMO_CALL_RE = re.compile(r"^demo call\s+%s(?:\s+([a-z_]+))?$" % CASE_ID, re.I)
 BUSINESS_RE = re.compile(r"^(?:business name|my business is)\s+(.+)$", re.I)
+WATCH_RE = re.compile(r"^(?:watch|monitor)\s+(?!status\b)(.+)$", re.I)
+STOP_WATCH_RE = re.compile(r"^(?:stop watching|stop monitoring|unwatch)\s+(.+)$", re.I)
+WATCH_STATUS = {"watch status", "watching", "email status"}
 STATE_TEXT = {
     "ON_HOLD": "payment on hold", "CALL_SCHEDULED": "automated call scheduled", "CALLING": "calling the vendor",
     "CALL_DONE": "call finished", "NO_ANSWER": "the vendor didn't answer", "CALL_FAILED": "the call failed",
@@ -204,6 +208,7 @@ def _vendor_command(t, low, store, sender, now):
         if not arg:
             return "Say `forget <name>` to delete one saved vendor, or `forget all` to delete everything."
         if arg.lower() == "all":
+            mailwatch.forget_all(store, sender)
             n = vendors.forget_all(store, sender)
             return ("Deleted %d saved vendor%s, your cases, your recent check and your setup answers."
                     % (n, "" if n == 1 else "s"))
@@ -256,6 +261,9 @@ def _save_vendor_reply(rest, store, sender, now):
                       "numbers: only the last 4 digits and a one-way fingerprint used to notice if "
                       "the number changes." % (rec["name"], rec["name"], rec["name"])])
     wants_monitoring = onboarding.load(store, sender).get("monitoring")
+    if wants_monitoring and rec.get("emails") and rec["id"] not in mailwatch.watch_state(store, sender).get("vendors", []):
+        lines.extend(["", "Want me to watch for emails from %s and flag bank-detail changes? Say `watch %s`."
+                          % (", ".join(rec["emails"]), rec["name"])])
     if status == "saved" and rec.get("phone") and wants_monitoring:
         consent.mark_requested(store, sender, rec, now)
         lines.extend(["", _consent_draft_reply(rec)])
@@ -333,6 +341,66 @@ def _consent_command(t, store, sender, now):
     consent.revoke(store, sender, vendor, now)
     return ("Consent for **%s** is revoked. No automated calls will be made to them; you'll get a script "
             "to call them yourself instead." % vendor["name"])
+
+
+def _watch_command(t, low, store, sender, now):
+    """Email watching commands. Returns a reply, or None if `t` is not one."""
+    if low in WATCH_STATUS:
+        state = mailwatch.watch_state(store, sender)
+        names = [r["name"] for r in vendors.list_vendors(store, sender) if r["id"] in state.get("vendors", [])]
+        if not names:
+            return "I'm not watching any vendor emails for you. Say `watch <vendor>` to start."
+        lines = ["**Email watching**", "",
+                 "- **Vendors:** %s" % ", ".join(names),
+                 "- **Your forwarding address:** `%s`" % mailwatch.forwarding_address(
+                     mailwatch.config()["address"], state["token"]) if mailwatch.configured() else
+                 "- **Mailbox:** not configured on this agent",
+                 "- **Forwarding:** %s" % ("working (first email received)" if state.get("confirmed_at")
+                                           else "waiting for your first forwarded email")]
+        return "\n".join(lines)
+
+    m = STOP_WATCH_RE.match(t)
+    if m:
+        vendor = vendors.get_vendor(store, sender, m.group(1))
+        if not vendor:
+            return "I don't have a saved vendor called **%s**." % vendors.clean_name(m.group(1))
+        if not mailwatch.stop_watching(store, sender, vendor):
+            return "I wasn't watching emails for **%s**." % vendor["name"]
+        return ("Stopped watching emails for **%s**. Emails about them that still arrive are ignored. You can "
+                "also delete the forwarding filter in your email settings." % vendor["name"])
+
+    m = WATCH_RE.match(t)
+    if not m:
+        return None
+    vendor = vendors.get_vendor(store, sender, m.group(1))
+    if not vendor:
+        return None  # not a vendor name: let other handlers try
+    status, address = mailwatch.start_watching(store, sender, vendor, now=now)
+    if status == "no_email":
+        return ("Save an email address for **%s** first, so I know whose emails to watch: "
+                "`save vendor %s email accounts@example.com`." % (vendor["name"], vendor["name"]))
+    if status == "no_mailbox":
+        return ("Email watching isn't switched on for this agent yet (its mailbox isn't configured). "
+                "You can still paste a vendor's email here with `check email`.")
+    senders = ", ".join(vendor.get("emails") or ["@" + d for d in vendor.get("domains", [])])
+    return "\n".join([
+        "OK: I'll watch for emails from **%s** (%s) and flag any change to their bank or tax details. "
+        "Say `stop watching %s` at any time." % (vendor["name"], senders, vendor["name"]),
+        "",
+        "**Set up forwarding once.** I never get access to your inbox, only what you forward to "
+        "your private address `%s`." % address,
+        "",
+        "In Gmail:",
+    ] + mailwatch.gmail_steps(address, vendor) + [
+        "",
+        "Using another email provider? Create a rule that forwards only %s's emails to `%s`."
+        % (vendor["name"], address),
+    ])
+
+
+def email_alert(res):
+    """Message for an email that arrived by forwarding (sent without the user asking)."""
+    return "📩 **New forwarded email**\n\n" + _email_reply(res)
 
 
 def _consent_draft_reply(vendor):
@@ -629,6 +697,9 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
         return _selftest(store)
 
     reply = _case_command(t, low, store, sender, now, llm)
+    if reply is not None:
+        return reply
+    reply = _watch_command(t, low, store, sender, now)
     if reply is not None:
         return reply
     m = BUSINESS_RE.match(t)

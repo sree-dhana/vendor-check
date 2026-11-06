@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -14,7 +15,9 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from format import first_contact, reply_for_text
+from format import email_alert
 from llm import PROVIDERS, load_config
+import mailwatch
 import workflow
 
 load_dotenv()
@@ -119,6 +122,37 @@ async def case_tick(ctx: Context):
                 await ctx.send(owner, create_text_chat(message))
         except Exception:
             ctx.logger.exception("case tick failed")  # no message text or IDs logged
+    for owner in set(mailwatch.watching_owners(store)):
+        for message in mailwatch.silence_notices(store, owner):
+            await ctx.send(owner, create_text_chat(message))
+
+
+if mailwatch.configured():
+    @agent.on_interval(period=float(mailwatch.config()["poll_sec"]))
+    async def poll_mailbox(ctx: Context):
+        """Fetch forwarded emails off the event loop, then process them on it."""
+        try:
+            raws = await asyncio.to_thread(mailwatch.fetch_new)
+        except Exception as e:
+            ctx.logger.warning("mailbox check failed: %s" % type(e).__name__)  # never the password or text
+            return
+        store = Store(ctx.storage)
+        for raw in raws:
+            try:
+                for owner, kind, payload in mailwatch.handle_message(store, raw):
+                    text = payload if kind == "text" else email_alert(payload)
+                    await ctx.send(owner, create_text_chat(text))
+            except Exception:
+                ctx.logger.exception("processing a forwarded email failed")
+
+
+@agent.on_event("startup")
+async def report_mailbox(ctx: Context):
+    if mailwatch.configured():
+        c = mailwatch.config()
+        ctx.logger.info("Email watching: on (%s, every %ds)" % (c["host"], c["poll_sec"]))
+    else:
+        ctx.logger.info("Email watching: off (set MAILBOX_* in .env to enable)")
 
 
 if __name__ == "__main__":

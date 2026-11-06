@@ -198,9 +198,10 @@ def _mark_seen(store, owner, message_id):
 
 # ---------- entry point ----------
 
-def process_email(store, owner, raw=None, parsed=None, now=None):
+def process_email(store, owner, raw=None, parsed=None, now=None, vendor_ids=None):
     """Process one email for `owner`. Returns a result dict with status: duplicate,
-    unknown_vendor, no_change or case_opened. Never acts on instructions in the email."""
+    unknown_vendor, no_change or case_opened. Never acts on instructions in the email.
+    vendor_ids, when given, limits matching to those vendors (the ones being watched)."""
     now = time.time() if now is None else now
     parsed = parsed or parse_email(raw)
     result = {"email": {k: parsed[k] for k in ("from_name", "from_addr", "reply_to", "subject", "forwarded")},
@@ -212,6 +213,8 @@ def process_email(store, owner, raw=None, parsed=None, now=None):
     _mark_seen(store, owner, parsed["message_id"])
 
     recs = vendors.list_vendors(store, owner)
+    if vendor_ids is not None:
+        recs = [r for r in recs if r["id"] in vendor_ids]
     ids = email_ids(parsed)
     vendor, how, detail = match_vendor(parsed, recs, ids)
     result["wording_flags"] = detect_flags(parsed["subject"] + "\n" + parsed["body"])
