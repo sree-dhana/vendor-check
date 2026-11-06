@@ -20,6 +20,7 @@ import consent
 import countries
 import detect
 import mailwatch
+import notify
 import telephony
 import workflow
 from iban import check_iban
@@ -85,6 +86,8 @@ BUSINESS_RE = re.compile(r"^(?:business name|my business is)\s+(.+)$", re.I)
 WATCH_RE = re.compile(r"^(?:watch|monitor)\s+(?!status\b)(.+)$", re.I)
 STOP_WATCH_RE = re.compile(r"^(?:stop watching|stop monitoring|unwatch)\s+(.+)$", re.I)
 WATCH_STATUS = {"watch status", "watching", "email status"}
+NOTIFY_EMAIL_RE = re.compile(r"^notify (?:me by )?email\s+(\S+)$", re.I)
+VERIFY_EMAIL_RE = re.compile(r"^verify email\s+(\d{6})$", re.I)
 STATE_TEXT = {
     "ON_HOLD": "payment on hold", "CALL_SCHEDULED": "automated call scheduled", "CALLING": "calling the vendor",
     "CALL_DONE": "call finished", "NO_ANSWER": "the vendor didn't answer", "CALL_FAILED": "the call failed",
@@ -209,6 +212,8 @@ def _vendor_command(t, low, store, sender, now):
             return "Say `forget <name>` to delete one saved vendor, or `forget all` to delete everything."
         if arg.lower() == "all":
             mailwatch.forget_all(store, sender)
+            notify.turn_off(store, sender)
+            store.set("notices:%s" % sender, [])
             n = vendors.forget_all(store, sender)
             return ("Deleted %d saved vendor%s, your cases, your recent check and your setup answers."
                     % (n, "" if n == 1 else "s"))
@@ -396,6 +401,49 @@ def _watch_command(t, low, store, sender, now):
         "Using another email provider? Create a rule that forwards only %s's emails to `%s`."
         % (vendor["name"], address),
     ])
+
+
+def _notify_command(t, low, store, sender, now):
+    """Backup-notification commands. Returns a reply, or None if `t` is not one."""
+    if low == "notify status":
+        address = notify.backup_email_for(store, sender)
+        return ("Backup emails go to **%s**. Say `notify off` to stop them." % address if address else
+                "No backup email is set. Alerts come as chat messages here, and anything you might "
+                "have missed is listed at the top of your next reply. To also get short emails, say "
+                "`notify email you@example.com`.")
+    if low in ("notify off", "stop notifications", "notify email off"):
+        notify.turn_off(store, sender)
+        return "Backup emails are off. Alerts still come here in chat."
+    m = NOTIFY_EMAIL_RE.match(t)
+    if m:
+        status = notify.request_email(store, sender, m.group(1), now)
+        return {
+            "bad_address": "That doesn't look like an email address.",
+            "unavailable": "Backup emails aren't switched on for this agent (its mailbox isn't configured).",
+            "send_failed": "I couldn't send the code just now. Please try again later.",
+            "sent": "I've emailed a 6-digit code to **%s**. Reply `verify email <code>` within an hour. "
+                    "Backup emails are short and never contain bank details." % m.group(1).lower(),
+        }[status]
+    m = VERIFY_EMAIL_RE.match(t)
+    if m:
+        status = notify.verify(store, sender, m.group(1), now)
+        return {
+            "nothing_pending": "There's no code waiting. Say `notify email you@example.com` first.",
+            "expired": "That code has expired or had too many attempts. Say `notify email ...` again.",
+            "wrong": "That code doesn't match.",
+            "verified": "✅ Backup emails are on: **%s**. You'll get a short email for each alert. Say "
+                        "`notify off` to stop." % notify.backup_email_for(store, sender),
+        }[status]
+    return None
+
+
+def email_alert_short(res):
+    """One line for the digest and backup email: never bank details."""
+    name = res["vendor"]["name"] if res.get("vendor") else "a vendor"
+    if res["status"] == "case_opened":
+        return ("New case %s for %s: an email asked to change their details. The payment is on hold."
+                % (res["case"]["id"], name))
+    return "An email about %s came with sender warnings. Say `my cases` or check the email." % name
 
 
 def email_alert(res):
@@ -655,6 +703,14 @@ def first_contact(store, sender, now=None):
 
 
 def reply_for_text(text, store, sender="local", now=None, llm=OFF):
+    reply = _reply_for_text(text, store, sender, now, llm)
+    if reply == RATE_LIMITED_TEXT:
+        return reply
+    digest = notify.take_digest(store, sender)
+    return "\n".join(digest) + reply if digest else reply
+
+
+def _reply_for_text(text, store, sender, now, llm):
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
@@ -700,6 +756,9 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if reply is not None:
         return reply
     reply = _watch_command(t, low, store, sender, now)
+    if reply is not None:
+        return reply
+    reply = _notify_command(t, low, store, sender, now)
     if reply is not None:
         return reply
     m = BUSINESS_RE.match(t)

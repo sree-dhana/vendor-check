@@ -68,6 +68,19 @@ def fake_net(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def no_real_mail(monkeypatch):
+    """No test may open a real IMAP or SMTP connection; tests pass fakes explicitly."""
+    import imaplib
+    import smtplib
+
+    def refuse(*a, **k):
+        raise AssertionError("a test tried to open a real mail connection")
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", refuse)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+
 @pytest.fixture
 def no_net(monkeypatch):
     def fail(*a, **k):

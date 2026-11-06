@@ -15,9 +15,10 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from format import first_contact, reply_for_text
-from format import email_alert
+from format import email_alert, email_alert_short
 from llm import PROVIDERS, load_config
 import mailwatch
+import notify
 import workflow
 
 load_dotenv()
@@ -119,12 +120,27 @@ async def case_tick(ctx: Context):
     for owner in workflow.owners(store):
         try:
             for message in workflow.tick(store, owner, client=LLM.client):
-                await ctx.send(owner, create_text_chat(message))
+                await deliver(ctx, store, owner, message)
         except Exception:
             ctx.logger.exception("case tick failed")  # no message text or IDs logged
     for owner in set(mailwatch.watching_owners(store)):
         for message in mailwatch.silence_notices(store, owner):
-            await ctx.send(owner, create_text_chat(message))
+            await deliver(ctx, store, owner, message)
+
+
+async def deliver(ctx: Context, store, owner, text, short=None):
+    """Every unprompted notice: a chat message, a line for the next reply's digest (in case
+    ASI:One doesn't show unprompted messages), and a short backup email if verified."""
+    await ctx.send(owner, create_text_chat(text))
+    short = short or notify.short_text(text)
+    notify.record(store, owner, short)
+    address = notify.backup_email_for(store, owner)
+    if address:
+        try:
+            await asyncio.to_thread(notify.send_email, address, "VendorCheck: " + short[:80],
+                                    notify.backup_body(short))
+        except Exception as e:
+            ctx.logger.warning("backup email failed: %s" % type(e).__name__)
 
 
 if mailwatch.configured():
@@ -140,8 +156,10 @@ if mailwatch.configured():
         for raw in raws:
             try:
                 for owner, kind, payload in mailwatch.handle_message(store, raw):
-                    text = payload if kind == "text" else email_alert(payload)
-                    await ctx.send(owner, create_text_chat(text))
+                    if kind == "text":
+                        await deliver(ctx, store, owner, payload)
+                    else:
+                        await deliver(ctx, store, owner, email_alert(payload), email_alert_short(payload))
             except Exception:
                 ctx.logger.exception("processing a forwarded email failed")
 
