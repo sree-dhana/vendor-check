@@ -19,6 +19,7 @@ import cases
 import consent
 import countries
 import detect
+import telephony
 import workflow
 from iban import check_iban
 import onboarding
@@ -78,6 +79,8 @@ APPROVE_RE = re.compile(r"^approve\s+%s(?:\s+(\S+))?$" % CASE_ID, re.I)
 REJECT_RE = re.compile(r"^reject\s+%s$" % CASE_ID, re.I)
 CALLBACK_RE = re.compile(r"^(confirmed|not confirmed|no answer)(?:\s+%s)?$" % CASE_ID, re.I)
 CANCEL_CALL_RE = re.compile(r"^(?:i'?ll call|i will call|cancel call|call myself)\s+%s$" % CASE_ID, re.I)
+DEMO_CALL_RE = re.compile(r"^demo call\s+%s(?:\s+([a-z_]+))?$" % CASE_ID, re.I)
+BUSINESS_RE = re.compile(r"^(?:business name|my business is)\s+(.+)$", re.I)
 STATE_TEXT = {
     "ON_HOLD": "payment on hold", "CALL_SCHEDULED": "automated call scheduled", "CALLING": "calling the vendor",
     "CALL_DONE": "call finished", "NO_ANSWER": "the vendor didn't answer", "CALL_FAILED": "the call failed",
@@ -421,12 +424,20 @@ def _next_step_lines(case, vendor):
         return workflow.callback_script(case, vendor)
     if state == cases.AWAITING_USER:
         lines = []
-        if case.get("outcome") == "VENDOR_DENIED":
+        outcome = case.get("outcome")
+        if outcome in ("VENDOR_DENIED", "DENIED_SENDING"):
             lines.append("The vendor said they did not send this. I suggest `reject %s`, not paying to "
                          "the new details, and reporting the email to your bank." % cid)
-        elif case.get("outcome") == "NO_ANSWER":
+        elif outcome == "NO_ANSWER":
             lines.append("Nobody answered, so nothing is confirmed. Don't approve until you've reached "
                          "them; then reply `confirmed %s` or `not confirmed %s`." % (cid, cid))
+        elif outcome == "CONFIRMED_BUT_READBACK_MISMATCH":
+            lines.append("The digits read back on the call don't match the request. Don't approve yet: "
+                         "call them yourself on the saved number, then reply `confirmed %s` or "
+                         "`not confirmed %s`." % (cid, cid))
+        elif outcome == "UNCLEAR":
+            lines.append("The call was unclear. Call them yourself on the saved number before deciding, "
+                         "then reply `confirmed %s` or `not confirmed %s`." % (cid, cid))
         lines.append("To approve, quote the case id and %s: `approve %s %s`. To keep your saved details, "
                      "say `reject %s`." % (cases.confirm_label(case), cid, cases.confirm_code(case), cid))
         return lines
@@ -443,7 +454,9 @@ def _case_report(store, owner, case):
     if outcome:
         lines.extend(["", "**Call result:** %s" % outcome])
     if case.get("summary"):
-        lines.extend(["", "**Summary:** %s" % case["summary"]])
+        lines.extend(["", "**Call summary** _(%s)_: %s" % (
+            "written by an AI model from the transcript, checked" if case.get("summary_source") == "llm"
+            else "from the call results", case["summary"])])
     if case.get("decision"):
         lines.extend(["", "**Your decision:** %s." % case["decision"]["decision"]])
     nxt = _next_step_lines(case, vendor)
@@ -452,14 +465,35 @@ def _case_report(store, owner, case):
     return "\n".join(lines)
 
 
-def _case_command(t, low, store, sender, now):
+def _case_command(t, low, store, sender, now, llm=OFF):
     """Case commands. Returns a reply, or None if `t` is not one."""
     if low in MY_CASES or CASE_RE.match(t) or APPROVE_RE.match(t) or REJECT_RE.match(t) \
-            or CALLBACK_RE.match(t) or CANCEL_CALL_RE.match(t):
-        notices = workflow.tick(store, sender, now)
+            or CALLBACK_RE.match(t) or CANCEL_CALL_RE.match(t) or DEMO_CALL_RE.match(t):
+        notices = workflow.tick(store, sender, now, client=llm.client)
     else:
         return None
     pre = ["\n".join(notices), ""] if notices else []
+
+    m = DEMO_CALL_RE.match(t)
+    if m:
+        if not countries.demo_mode():
+            return "Demo calls only work with `DEMO_MODE=1` in the agent's `.env`."
+        case = cases.get_case(store, sender, m.group(1))
+        if not case:
+            return "I don't have a case `%s`." % m.group(1).upper()
+        scenario = (m.group(2) or "confirm_match").lower()
+        if scenario not in telephony.SCENARIOS:
+            return "Unknown scenario. Try one of: %s." % ", ".join("`%s`" % s for s in telephony.SCENARIOS)
+        if case["state"] == cases.ON_HOLD and case.get("call_after"):
+            case = cases.transition(store, sender, case["id"], cases.CALL_SCHEDULED, note="demo: call now", now=now)
+        if case["state"] != cases.CALL_SCHEDULED:
+            return ("Case `%s` isn't waiting for an automated call (%s). Automated calls need "
+                    "`CALLS_ENABLED=1`, `DEMO_MODE=1`, a vendor in India, and the vendor's consent for the "
+                    "saved number (`consent request <vendor>`)." % (case["id"], STATE_TEXT[case["state"]]))
+        msg = workflow.place_call(store, sender, case["id"], telephony.MockTelephony(scenario), now, llm.client)
+        case = cases.get_case(store, sender, case["id"])
+        return "\n".join(pre + ["_Demo call (mock phone, scenario `%s`)._ %s" % (scenario, msg), "",
+                                _case_report(store, sender, case)])
 
     if low in MY_CASES:
         open_cases = cases.list_cases(store, sender, open_only=low != "all cases")
@@ -594,9 +628,17 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     if low == "selftest":
         return _selftest(store)
 
-    reply = _case_command(t, low, store, sender, now)
+    reply = _case_command(t, low, store, sender, now, llm)
     if reply is not None:
         return reply
+    m = BUSINESS_RE.match(t)
+    if m:
+        name = vendors.clean_name(m.group(1), vendors.MAX_TEXT)
+        profile = onboarding.load(store, sender)
+        profile["business_name"] = name
+        store.set("profile:%s" % sender, profile)
+        return ("Saved your business name as **%s**. Automated verification calls will say they're "
+                "made on behalf of %s." % (name, name))
     reply = _vendor_command(t, low, store, sender, now)
     if reply is not None:
         return reply

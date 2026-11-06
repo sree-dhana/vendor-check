@@ -63,13 +63,15 @@ def test_call_permission_needs_switch_profile_phone_and_consent(store, env, vend
 def test_call_allowed_only_with_everything(store):
     vendor = dict(vendors.get_vendor(store, "me", "Sharma Traders"),
                   consent={"status": "granted", "phone": "+919876543210"})
-    assert workflow.call_permission(vendor, {"CALLS_ENABLED": "1"}) == (True, "")
+    assert workflow.call_permission(vendor, {"CALLS_ENABLED": "1", "DEMO_MODE": "1"}) == (True, "")
+    allowed, why = workflow.call_permission(vendor, {"CALLS_ENABLED": "1"})  # no phone service
+    assert not allowed and "no phone service" in why
 
 
 def test_cancel_window_then_scheduled_or_cancelled(store):
     vendor = dict(vendors.get_vendor(store, "me", "Sharma Traders"),
                   consent={"status": "granted", "phone": "+919876543210"})
-    env = {"CALLS_ENABLED": "1", "CANCEL_WINDOW_MIN": "10"}
+    env = {"CALLS_ENABLED": "1", "DEMO_MODE": "1", "CANCEL_WINDOW_MIN": "10"}
     case, route, _ = workflow.open_and_route(store, "me", vendor, [{"field": "ifsc", "old": "a", "new": "b"}],
                                              {"type": "email", "ref": "x"}, [], now=0, env=env)
     assert route == "call" and case["state"] == cases.ON_HOLD and case["call_after"] == 600

@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Fact:
     text: str
-    source: str  # URL
-    last_checked: str  # YYYY-MM-DD
+    source: str 
+    last_checked: str 
 
 
 @dataclass(frozen=True)
@@ -15,9 +15,10 @@ class CallRules:
     calls_enabled: bool
     consent_required: tuple = ("vendor_call", "vendor_recording")
     recording_allowed_by_default: bool = False
-    notes: tuple = ()  # Facts
+    notes: tuple = () 
     window: tuple = (10, 18)  # local hours, start inclusive, end exclusive
     language: str = "en"
+    utc_offset_min: int = 0  # local time for the call window
 
 
 @dataclass(frozen=True)
@@ -35,3 +36,4 @@ class Profile:
 
     def check_ids(self, vendor, store):
         return self.id_checks(vendor, store) if self.id_checks else []
+  

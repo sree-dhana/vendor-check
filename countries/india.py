@@ -26,7 +26,7 @@ PROFILE = Profile(
     name="India",
     confidence="full",
     last_checked="2026-11-02",
-    call_rules=CallRules(calls_enabled=True, window=(10, 18), language="en"),
+    call_rules=CallRules(calls_enabled=True, window=(10, 18), language="en", utc_offset_min=330),  # IST
     summary="GSTIN, PAN, IFSC and PIN checks, cross-checks, change detection and your approval",
     lookups=("ifsc.razorpay.com (IFSC)", "api.postalpincode.in (PIN)"),
     not_researched=("payment terms", "rules on automated or recorded calls"),

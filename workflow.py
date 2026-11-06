@@ -8,15 +8,18 @@ proof: the user always decides."""
 import os
 import time
 
+import analyze_call
+import callscript
 import cases
 import countries
+import telephony
 import vendors
 
 OUTCOME_TEXT = {
     # human callback (the user called)
     "VENDOR_SAID_CONFIRM": "you called and the vendor said they confirm the change",
     "VENDOR_DENIED": "you called and the vendor said they did not send this",
-    "NO_ANSWER": "you called and nobody answered",
+    "NO_ANSWER": "nobody answered the call",
     # automated call results (step 8)
     "CONFIRMED_AND_READBACK_MATCHES": "the vendor said they confirm, and the digits they read back match",
     "CONFIRMED_BUT_READBACK_MISMATCH": "the vendor said they confirm, but the digits they read back do not match",
@@ -27,6 +30,7 @@ NOT_PROOF = "This is not proof; confirm yourself before approving."
 CALLBACK_ANSWERS = {"confirmed": "VENDOR_SAID_CONFIRM", "not confirmed": "VENDOR_DENIED",
                     "no answer": "NO_ANSWER"}
 REMINDER_HOURS = 12
+RETRY_HOURS = 2
 
 
 def _int_env(name, default, env=None):
@@ -53,7 +57,78 @@ def call_permission(vendor, env=None):
     consent = vendor.get("consent") or {}
     if consent.get("status") != "granted" or consent.get("phone") != vendor["phone"]:
         return False, "the vendor hasn't agreed to automated calls on the saved number"
+    if telephony.get_telephony(env) is None:
+        return False, "no phone service is set up (only the demo mock exists so far)"
     return True, ""
+
+
+def in_call_window(vendor, now, env=None):
+    """Inside the country profile's calling hours, in the vendor's local time. Demo mode
+    ignores the hours because no real phone rings."""
+    if countries.demo_mode(env):
+        return True
+    rules = countries.get_profile(vendor.get("country") or "GENERIC").call_rules
+    hour = time.gmtime(now + rules.utc_offset_min * 60).tm_hour
+    return rules.window[0] <= hour < rules.window[1]
+
+
+def business_name(store, owner):
+    try:
+        return (store.get("profile:%s" % owner, {}) or {}).get("business_name")
+    except Exception:
+        return None
+
+
+def place_call(store, owner, case_id, tel, now=None, client=None, env=None):
+    """Place one automated verification call for a CALL_SCHEDULED case. Permission is
+    checked again at dialling time, and only the saved number the consent covers is dialled.
+    Returns a short message for the user."""
+    now = time.time() if now is None else now
+    data = cases._load(store, owner)
+    case = data[case_id]
+    vendor = vendors.get_vendor_by_id(store, owner, case["vendor_id"])
+    allowed, reason = call_permission(vendor or {}, env) if vendor else (False, "the vendor was deleted")
+    if not allowed or tel is None:
+        cases.transition_case(case, cases.HUMAN_CALLBACK, "system", "human callback: " + (reason or "no phone service"), now)
+        cases._save(store, owner, data)
+        return "I couldn't place the call for case `%s` (%s). Please call them yourself: say `case %s`." % (
+            case_id, reason or "no phone service", case_id)
+    phone = vendor["phone"]
+    if phone != vendor["consent"]["phone"]:  # never dial anything but the consented, saved number
+        raise RuntimeError("refusing to dial a number other than the saved, consented one")
+    recording = bool(vendor["consent"].get("recording"))
+    script = callscript.build_script(case, vendor, business_name(store, owner), recording)
+    cases.transition_case(case, cases.CALLING, "system", "calling the saved number", now)
+    call_id = tel.place_call(phone, script, record=recording)
+    status = tel.status(call_id)
+    case["call_attempts"].append({"at": now, "status": status})
+    if status == "completed":
+        turns = tel.transcript(call_id)  # analysed in memory, never stored or logged
+        expected = {s["step"]: s["expect"] for s in script if "expect" in s}
+        result = analyze_call.analyze(turns, expected)
+        cases.transition_case(case, cases.CALL_DONE, "system", "call finished", now)
+        summary, source = analyze_call.summarize(turns, result, client)
+        case.update(outcome=result["label"], summary=summary, summary_source=source,
+                    readback=result["readback"], speaker_name=result["speaker_name"])
+        cases.transition_case(case, cases.AWAITING_USER, "system", "call result: %s" % result["label"], now)
+        msg = ("The verification call for case `%s` (%s) finished: %s. Say `case %s` for the report."
+               % (case_id, case["vendor_name"], OUTCOME_TEXT[result["label"]], case_id))
+    else:
+        state = cases.NO_ANSWER if status == "no-answer" else cases.CALL_FAILED
+        cases.transition_case(case, state, "system", "call attempt: %s" % status, now)
+        if len(case["call_attempts"]) < cases.MAX_CALL_ATTEMPTS:
+            case["next_call_at"] = now + RETRY_HOURS * 3600
+            msg = ("No answer on the verification call for case `%s`. I'll try again in %d hours."
+                   % (case_id, RETRY_HOURS) if state == cases.NO_ANSWER else
+                   "The verification call for case `%s` failed. I'll try again in %d hours." % (case_id, RETRY_HOURS))
+        else:
+            case["outcome"] = "NO_ANSWER" if state == cases.NO_ANSWER else None
+            cases.transition_case(case, cases.HUMAN_CALLBACK, "system",
+                                  "no answer after %d calls" % cases.MAX_CALL_ATTEMPTS, now)
+            msg = ("No answer after %d calls for case `%s`. Please call them yourself: say `case %s`."
+                   % (cases.MAX_CALL_ATTEMPTS, case_id, case_id))
+    cases._save(store, owner, data)
+    return msg
 
 
 def after_open(store, owner, case, vendor, now=None, env=None):
@@ -131,9 +206,10 @@ def outcome_line(case):
     return "%s. %s" % (OUTCOME_TEXT[case["outcome"]][0].upper() + OUTCOME_TEXT[case["outcome"]][1:], NOT_PROOF)
 
 
-def tick(store, owner, now=None, env=None):
+def tick(store, owner, now=None, env=None, tel=None, client=None):
     """Periodic work for one owner: expire old cases, move cases past their cancel window
-    to CALL_SCHEDULED, and remind about cases waiting for the user. Returns messages."""
+    or retry delay to CALL_SCHEDULED, place due calls inside calling hours, and remind about
+    cases waiting for the user. Returns messages for the user."""
     now = time.time() if now is None else now
     messages = []
     for case in cases.expire_due(store, owner, now):
@@ -141,10 +217,18 @@ def tick(store, owner, now=None, env=None):
                         "saved details stay as they were." % (case["id"], case["vendor_name"]))
     data = cases._load(store, owner)
     dirty = False
+    to_call = []
     for case in data.values():
         if case["state"] == cases.ON_HOLD and case.get("call_after") and now >= case["call_after"]:
             cases.transition_case(case, cases.CALL_SCHEDULED, "system", "cancel window passed", now)
             dirty = True
+        elif case["state"] in (cases.NO_ANSWER, cases.CALL_FAILED) and now >= case.get("next_call_at", 0):
+            cases.transition_case(case, cases.CALL_SCHEDULED, "system", "retrying the call", now)
+            dirty = True
+        if case["state"] == cases.CALL_SCHEDULED:
+            vendor = vendors.get_vendor_by_id(store, owner, case["vendor_id"]) or {}
+            if in_call_window(vendor, now, env):
+                to_call.append(case["id"])
         elif case["state"] in (cases.HUMAN_CALLBACK, cases.AWAITING_USER):
             last = case.get("reminded_at") or case["created_at"]
             if now - last >= REMINDER_HOURS * 3600:
@@ -157,6 +241,9 @@ def tick(store, owner, now=None, env=None):
                                 % (case["id"], case["vendor_name"], todo, case["id"]))
     if dirty:
         cases._save(store, owner, data)
+    for case_id in to_call:  # after saving, so each call works on fresh data
+        messages.append(place_call(store, owner, case_id, tel if tel is not None else telephony.get_telephony(env),
+                                   now, client, env))
     return messages
 
 

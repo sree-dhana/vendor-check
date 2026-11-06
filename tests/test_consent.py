@@ -10,7 +10,7 @@ from flags import contains_banned
 
 GST = "27AAPFU0939F1ZV"
 PHONE = "+919876543210"
-ON = {"CALLS_ENABLED": "1"}
+ON = {"CALLS_ENABLED": "1", "DEMO_MODE": "1"}  # demo mode supplies the mock phone service
 
 
 @pytest.fixture

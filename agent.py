@@ -115,7 +115,7 @@ async def case_tick(ctx: Context):
     store = Store(ctx.storage)
     for owner in workflow.owners(store):
         try:
-            for message in workflow.tick(store, owner):
+            for message in workflow.tick(store, owner, client=LLM.client):
                 await ctx.send(owner, create_text_chat(message))
         except Exception:
             ctx.logger.exception("case tick failed")  # no message text or IDs logged
