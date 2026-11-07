@@ -1,4 +1,5 @@
 import re
+import secrets
 import time
 from email.utils import make_msgid
 
@@ -46,7 +47,8 @@ HELP_TEXT = (
     "- `pincode 560001`\n\n"
     "Write each ID without spaces. Say `sample` for a ready-to-copy example.\n"
     "I check format, checksum and consistency. I can't prove identity or that a GSTIN is active.\n\n"
-    "New here? Say `start` to set up your business and vendors."
+    "New here? Say `start` to set up your business and vendors, or `demo` for a 1-minute guided "
+    "tour with sample data."
 ) % (SAMPLE_GSTIN, SAMPLE_PAN, SAMPLE_IFSC, SAMPLE_GSTIN, SAMPLE_IFSC)
 
 SAMPLE_TEXT = (
@@ -218,6 +220,7 @@ def _vendor_command(t, low, store, sender, now):
             mailwatch.forget_all(store, sender)
             notify.turn_off(store, sender)
             store.set("notices:%s" % sender, [])
+            store.set("demo:%s" % sender, {})
             n = vendors.forget_all(store, sender)
             return ("Deleted %d saved vendor%s, your cases, your recent check and your setup answers."
                     % (n, "" if n == 1 else "s"))
@@ -495,6 +498,8 @@ def _send_consent(store, owner, vendor, now):
     if not mailwatch.configured():
         return "Sending emails isn't switched on for this agent (its mailbox isn't configured)."
     record = vendor.get("consent") or {}
+    if vendor.get("demo"):
+        return "**%s** is the demo's sample vendor, so I don't email it." % vendor["name"]
     if record.get("status") == "granted":
         return "**%s** has already agreed: %s." % (vendor["name"], consent.describe(record))
     if not record.get("requested_at"):
@@ -690,11 +695,12 @@ def _case_command(t, low, store, sender, now, llm=OFF):
 
     m = DEMO_CALL_RE.match(t)
     if m:
-        if not countries.demo_mode():
-            return "Demo calls only work with `DEMO_MODE=1` in the agent's `.env`."
         case = cases.get_case(store, sender, m.group(1))
         if not case:
             return "I don't have a case `%s`." % m.group(1).upper()
+        if not countries.demo_mode() and not case.get("demo"):
+            return ("Simulated calls work on the guided demo's cases (say `demo`), or on any case when "
+                    "the agent runs with `DEMO_MODE=1`.")
         scenario = (m.group(2) or "confirm_match").lower()
         if scenario not in telephony.SCENARIOS:
             return "Unknown scenario. Try one of: %s." % ", ".join("`%s`" % s for s in telephony.SCENARIOS)
@@ -822,6 +828,131 @@ def _within_budget(started):
     return _clock() - started < REPLY_BUDGET_S
 
 
+# ---------- guided demo for judges ----------
+# Runs the real code paths on sample data: the vendor is marked demo, its phone is a
+# placeholder, its consent is simulated, its calls only go to the simulated phone, and it is
+# never emailed. `demo reset` deletes it all; real vendors and cases are never touched.
+
+DEMO_RE = re.compile(r"^(?:demo|demo tour|tour|try demo|start demo)$", re.I)
+DEMO_NEXT = {"next", "demo next", "continue"}
+DEMO_RESET = {"demo reset", "reset demo", "end demo", "stop demo"}
+DEMO_PHONE = "+910000000000"  # not a real number
+DEMO_VENDOR = "Demo Traders (sample)"
+
+
+def _demo_email(token):
+    return ("From: Demo Traders <accounts@demo-traders.example>\n"
+            "Subject: Updated bank details\nMessage-ID: <demo-%s@demo-traders.example>\n\n"
+            "We have changed our bank account. Please pay today.\n"
+            "IFSC SBIN0000001\nAccount number 55500011112222\n" % token)
+
+
+def _demo_state(store, owner):
+    try:
+        s = store.get("demo:%s" % owner, {})
+        return s if isinstance(s, dict) else {}
+    except Exception:
+        return {}
+
+
+def _demo_command(low, store, owner, now, llm):
+    """The guided tour. Returns a reply, or None if this isn't a demo command."""
+    if DEMO_RE.match(low):
+        return _demo_start(store, owner, now)
+    if low in DEMO_RESET:
+        n = vendors.forget_demo(store, owner)
+        store.set("demo:%s" % owner, {})
+        return ("Demo data deleted%s. Your own vendors and cases weren't touched. Say `start` to set up "
+                "VendorCheck for real." % ("" if n else " (there was none)"))
+    if low in DEMO_NEXT:
+        state = _demo_state(store, owner)
+        if state.get("step"):
+            return _demo_step(store, owner, state, now, llm)
+    return None
+
+
+def _demo_start(store, owner, now):
+    vendors.forget_demo(store, owner)
+    vendors.save_vendor(store, owner, DEMO_VENDOR, {
+        "gstin": SAMPLE_GSTIN, "pan": SAMPLE_PAN, "ifsc": SAMPLE_IFSC, "acct_digits": "1234567890",
+        "country": "IN", "phone": DEMO_PHONE, "contact": "Ravi (sample)",
+        "emails": ["accounts@demo-traders.example"], "domains": ["demo-traders.example"]}, now)
+    vendor = vendors.get_vendor(store, owner, DEMO_VENDOR)
+    vendors.set_fields(store, owner, vendor["id"], demo=True, consent={
+        "status": "granted", "call": True, "recording": False, "phone": DEMO_PHONE,
+        "version": consent.WORDING_VERSION, "replied_by": "simulated for the demo", "sender_saved": True})
+    store.set("demo:%s" % owner, {"step": 1})
+    return "\n".join([
+        "**VendorCheck guided demo** (about 1 minute). It uses **sample data only**: no real emails, "
+        "no real calls, and your own data isn't touched. Say `demo reset` at any time to delete it.",
+        "",
+        "**Step 1 of 4: a saved vendor.** You register each vendor once, with a phone number you already "
+        "trust. In real use you'd also send them a consent request (`send consent <name>`); here their "
+        "consent is simulated.",
+        "",
+    ] + _vendor_card(vendors.get_vendor(store, owner, DEMO_VENDOR)) + [
+        "",
+        "Say `next` to see a scam email arrive.",
+    ])
+
+
+def _demo_step(store, owner, state, now, llm):
+    step = state["step"]
+    if step == 1:
+        res = detect.process_email(store, owner, raw=_demo_email(secrets.token_hex(4)), now=now)
+        if not res.get("case"):
+            return "The demo email didn't open a case. Say `demo` to restart the tour."
+        store.set("demo:%s" % owner, {"step": 2, "case_id": res["case"]["id"]})
+        return "\n".join([
+            "**Step 2 of 4: a \"we've changed our bank account\" email arrives.** In real use your email "
+            "forwards it to me automatically (`watch <vendor>`). Here's what I found:",
+            "",
+            _email_reply(res),
+            "",
+            "Say `next` to run the verification call.",
+        ])
+    case_id = state.get("case_id")
+    case = cases.get_case(store, owner, case_id or "")
+    if not case:
+        return "The demo case is gone. Say `demo` to restart the tour."
+    if step == 2:
+        if case["state"] == cases.ON_HOLD:
+            case = cases.transition(store, owner, case_id, cases.CALL_SCHEDULED, note="demo: call now", now=now)
+        if case["state"] == cases.CALL_SCHEDULED:
+            workflow.place_call(store, owner, case_id, telephony.MockTelephony("confirm_match"), now, llm.client)
+        store.set("demo:%s" % owner, {"step": 3, "case_id": case_id})
+        return "\n".join([
+            "**Step 3 of 4: the verification call** (simulated). I called only the **saved** number, never "
+            "one from the email, used a fixed script, and asked the vendor to read back the last digits of "
+            "the new account. **A call result is evidence, not proof.**",
+            "",
+            _case_report(store, owner, cases.get_case(store, owner, case_id)),
+        ])
+    if step == 3:
+        store.set("demo:%s" % owner, {"step": 4, "case_id": case_id})
+        if case["state"] in (cases.APPROVED, cases.REJECTED):
+            return _demo_wrapup(case)
+        return ("**Step 4 of 4: your decision.** Only you can approve, by quoting the case and the new "
+                "account's last 4 digits. Type it yourself: `approve %s %s`. Or say `reject %s` to keep the "
+                "old details." % (case_id, cases.confirm_code(case), case_id))
+    return _demo_wrapup(case)
+
+
+def _demo_wrapup(case):
+    cid = case["id"]
+    return "\n".join([
+        "**That's the tour.** The case is %s." % STATE_TEXT[case["state"]],
+        "",
+        "Try more:",
+        "- `demo call %s denied`, or `confirm_mismatch` / `unclear` on a new tour, to see other call results"
+        % cid,
+        "- `verify case %s` to compare the decision with its fingerprint on the Fetch.ai ledger (if "
+        "anchoring is on)" % cid,
+        "- `GSTIN 27AAPFU0939F1ZX` for a typo fix, or `rules UK` for the country profiles",
+        "- `demo reset` to delete the sample data, then `start` to set up for real",
+    ])
+
+
 def _reply_for_text(text, store, sender, now, llm):
     started = _clock()
     if not allow_message(store, sender, now):
@@ -841,6 +972,9 @@ def _reply_for_text(text, store, sender, now, llm):
         return TOO_LONG_TEXT % len(t)
     low = t.lower()
 
+    reply = _demo_command(low, store, sender, now, llm)
+    if reply is not None:
+        return reply
     if low in START_WORDS:
         return onboarding.begin(store, sender, now)
     m = SETTINGS_RE.match(t)

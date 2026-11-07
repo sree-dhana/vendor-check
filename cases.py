@@ -116,6 +116,7 @@ def open_case(store, owner, vendor, changes, trigger=None, flags=(), now=None):
         "owner": owner,
         "vendor_id": vendor["id"],
         "vendor_name": vendor["name"],
+        "demo": bool(vendor.get("demo")),  # sample data from the guided demo
         "state": RECEIVED,
         "trigger": dict(trigger or {"type": "chat"}),
         "changes": [dict(c) for c in changes],

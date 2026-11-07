@@ -308,6 +308,31 @@ def save_vendor(store, sender, name, ids, now=None):
     return status
 
 
+def set_fields(store, sender, vendor_id, **fields):
+    """Set extra fields on a vendor record (used by the guided demo to mark its sample vendor)."""
+    data = _vendors(store, sender)
+    for rec in data.values():
+        if rec["id"] == vendor_id:
+            rec.update(fields)
+            store.set("vendors:%s" % sender, data)
+            return rec
+    return None
+
+
+def forget_demo(store, sender):
+    """Delete the guided demo's sample vendor and cases. Real data is never touched."""
+    data = _vendors(store, sender)
+    demo_ids = [k for k, rec in data.items() if rec.get("demo")]
+    for k in demo_ids:
+        data.pop(k)
+    store.set("vendors:%s" % sender, data)
+    cases_data = _get(store, "cases:%s" % sender, {})
+    for cid in [cid for cid, c in cases_data.items() if c.get("demo")]:
+        cases_data.pop(cid)
+    store.set("cases:%s" % sender, cases_data)
+    return len(demo_ids)
+
+
 def apply_changes(store, sender, vendor_id, changes, now=None):
     """Write an approved case's changes into the vendor record. Called only by
     cases.approve, after the user has approved with the right code."""

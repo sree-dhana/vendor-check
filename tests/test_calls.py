@@ -211,7 +211,7 @@ def test_call_window_in_india_time():
 def test_demo_needs_demo_mode(monkeypatch, store):
     case = _open_case(store)
     monkeypatch.setenv("DEMO_MODE", "0")
-    assert "only work with `DEMO_MODE=1`" in _say(store, "demo call %s" % case["id"])
+    assert "or on any case when the agent runs with `DEMO_MODE=1`" in _say(store, "demo call %s" % case["id"])
 
 
 # ---------- summary ----------

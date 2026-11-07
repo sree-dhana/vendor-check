@@ -46,7 +46,11 @@ def cancel_window_min(env=None):
 
 
 def call_permission(vendor, env=None):
-    """(allowed, reason). When unsure, the answer is no: human callback."""
+    """(allowed, reason). When unsure, the answer is no: human callback.
+    The guided demo's sample vendor (marked demo, placeholder phone, simulated consent) is
+    always allowed, because its calls only ever go to the simulated phone (see tel_for)."""
+    if vendor.get("demo"):
+        return True, ""
     if not countries.calls_globally_enabled(env):
         return False, "automated calls are switched off"
     profile = countries.get_profile(vendor.get("country") or "GENERIC")
@@ -65,7 +69,7 @@ def call_permission(vendor, env=None):
 def in_call_window(vendor, now, env=None):
     """Inside the country profile's calling hours, in the vendor's local time. Demo mode
     ignores the hours because no real phone rings."""
-    if countries.demo_mode(env):
+    if countries.demo_mode(env) or vendor.get("demo"):
         return True
     rules = countries.get_profile(vendor.get("country") or "GENERIC").call_rules
     hour = time.gmtime(now + rules.utc_offset_min * 60).tm_hour
@@ -242,9 +246,15 @@ def tick(store, owner, now=None, env=None, tel=None, client=None):
     if dirty:
         cases._save(store, owner, data)
     for case_id in to_call:  # after saving, so each call works on fresh data
-        messages.append(place_call(store, owner, case_id, tel if tel is not None else telephony.get_telephony(env),
-                                   now, client, env))
+        messages.append(place_call(store, owner, case_id, tel_for(data[case_id], tel, env), now, client, env))
     return messages
+
+
+def tel_for(case, tel=None, env=None):
+    """The phone service for a case. Demo cases only ever use the simulated phone."""
+    if case.get("demo"):
+        return telephony.MockTelephony("confirm_match")
+    return tel if tel is not None else telephony.get_telephony(env)
 
 
 def owners(store):

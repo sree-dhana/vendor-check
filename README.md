@@ -2,7 +2,7 @@
 
 A Fetch.ai agent that protects small businesses from vendor-payment mistakes and "we've changed our bank account" fraud. It checks a vendor's tax and bank details, watches your vendors' emails for requests to change them, **holds the payment**, helps you confirm with the vendor on the phone number you saved, and changes nothing until **you** approve.
 
-Talk to it on ASI:One as **@vendorchecker** (agent address `agent1qfgjfnaffngvss45953n0x362p0hyfj7xpag073lppuqnnsdruyzg6750aq`). Say `start` to set it up.
+Talk to it on ASI:One as **@vendorchecker** (agent address `agent1qfgjfnaffngvss45953n0x362p0hyfj7xpag073lppuqnnsdruyzg6750aq`). Say **`demo`** for a 1-minute guided tour on sample data (no set-up, no real emails or calls), or `start` to set it up for real.
 
 ## Legal notice
 The legal side of this product is **not settled and needs careful study before real use**: calling people with automated or AI voices, recording and transcribing calls, consent from vendors, data protection, and country-specific rules. Nothing here or in the agent is legal advice. Until a qualified person reviews it, **automated verification calls are off by default**, run only in demo mode (a simulated phone) or with your own consent and test numbers, and are not enabled for any country except India. The agent says this in its `start` reply.
@@ -45,7 +45,8 @@ Say `rules <country>` to see a profile's facts, each with its source and the dat
 | `approve <id> <last 4>`, `reject <id>` | Your decision |
 | `verify case <id>` | Compare a closed case with its fingerprint on the Fetch.ai ledger |
 | `notify email <address>`, `verify email <code>`, `notify status`, `notify off` | Optional backup email alerts |
-| `demo call <id> [scenario]` | Demo mode only: a simulated verification call |
+| `demo`, `next`, `demo reset` | Guided tour on sample data: a saved vendor, a scam email, a simulated call, your approval. `demo reset` deletes the sample data; your own data is never touched |
+| `demo call <id> [scenario]` | A simulated call with another outcome (`denied`, `confirm_mismatch`, `unclear`, `no_answer`) on a demo case, or on any case with `DEMO_MODE=1` |
 | `forget vendor <name>`, `forget all` | Delete data (see Privacy) |
 | `help`, `sample` | Examples |
 
