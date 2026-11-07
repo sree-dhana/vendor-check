@@ -17,6 +17,7 @@ from uagents_core.contrib.protocols.chat import (
 from format import first_contact, reply_for_text
 from format import email_alert, email_alert_short
 from llm import PROVIDERS, load_config
+import anchor
 import mailwatch
 import notify
 import workflow
@@ -51,11 +52,18 @@ def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
     return ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(), content=content)
 
 
+# The agent stays on mainnet: on testnet its address becomes "test-agent1..." and ASI:One,
+# which knows it as "agent1...", can no longer reach it. Decision fingerprints are anchored
+# separately on ANCHOR_NETWORK (testnet by default, free) using the same wallet key.
+NETWORK = anchor.agent_network()
+ANCHOR_NETWORK = anchor.network()
+
 agent = Agent(
     name=os.environ.get("AGENT_NAME", "vendor-check"),
     seed=SEED,
     port=int(os.environ.get("AGENT_PORT", "8000")),
     mailbox=True,
+    network=NETWORK,
 )
 protocol = Protocol(spec=chat_protocol_spec)
 
@@ -162,6 +170,53 @@ if mailwatch.configured():
                         await deliver(ctx, store, owner, email_alert(payload), email_alert_short(payload))
             except Exception:
                 ctx.logger.exception("processing a forwarded email failed")
+
+
+MIN_ANCHOR_BALANCE = 10 ** 15  # in the network's smallest unit; a top-up is asked for below this
+
+
+def anchor_ledger():
+    from uagents.network import get_ledger
+    return anchor.FetchLedger(agent.wallet, get_ledger(ANCHOR_NETWORK), ANCHOR_NETWORK)
+
+
+@agent.on_event("startup")
+async def report_ledger(ctx: Context):
+    if NETWORK == "testnet":
+        ctx.logger.warning("AGENT_NETWORK=testnet gives this agent a 'test-agent' address that ASI:One "
+                           "can't reach. Use AGENT_NETWORK=mainnet; anchoring can still use testnet.")
+    if not anchor.enabled():
+        return
+    ledger = anchor_ledger()
+    try:
+        balance = await asyncio.to_thread(ledger.balance)
+    except Exception as e:
+        ctx.logger.warning("Anchoring ledger: couldn't read the wallet balance (%s)" % type(e).__name__)
+        return
+    ctx.logger.info("Anchoring ledger: %s, wallet %s, balance %d" % (ANCHOR_NETWORK, agent.wallet.address(), balance))
+    if ANCHOR_NETWORK == "testnet" and balance < MIN_ANCHOR_BALANCE:
+        from uagents.network import add_testnet_funds
+        await asyncio.to_thread(add_testnet_funds, str(agent.wallet.address()))
+        ctx.logger.info("Anchoring ledger: asked the testnet faucet for funds")
+    elif ANCHOR_NETWORK == "mainnet":
+        ctx.logger.warning("Anchoring on mainnet spends real FET; ANCHOR_NETWORK=testnet is free")
+
+
+if anchor.enabled():
+    @agent.on_interval(period=60.0)
+    async def anchor_decisions(ctx: Context):
+        """Write fingerprints of closed cases to the ledger, off the event loop."""
+        store = Store(ctx.storage)
+        ledger = anchor_ledger()
+        for owner in anchor.owners_with_pending(store):
+            for case_id, memo in anchor.pending(store, owner):
+                try:
+                    tx_hash = await asyncio.to_thread(ledger.submit, memo)
+                    anchor.record_anchor(store, owner, case_id, tx_hash, ANCHOR_NETWORK)
+                    ctx.logger.info("Anchored a decision fingerprint: tx %s" % tx_hash)
+                except Exception as e:
+                    anchor.record_failure(store, owner, case_id, type(e).__name__)
+                    ctx.logger.warning("Anchoring failed (%s); will retry" % type(e).__name__)
 
 
 @agent.on_event("startup")

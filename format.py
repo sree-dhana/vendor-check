@@ -15,6 +15,7 @@ from limits import RATE_LIMITED_TEXT, TOO_LONG_TEXT, allow_llm, allow_message, t
 from llm import OFF, classify_flags_llm, extract_ids_llm, flags_inconclusive, should_extract, summarize
 from lookups import ifsc_result, lookup_ifsc, lookup_pin, pin_result
 from suggest import gstin_typo_fixes
+import anchor
 import cases
 import consent
 import countries
@@ -82,6 +83,7 @@ REJECT_RE = re.compile(r"^reject\s+%s$" % CASE_ID, re.I)
 CALLBACK_RE = re.compile(r"^(confirmed|not confirmed|no answer)(?:\s+%s)?$" % CASE_ID, re.I)
 CANCEL_CALL_RE = re.compile(r"^(?:i'?ll call|i will call|cancel call|call myself)\s+%s$" % CASE_ID, re.I)
 DEMO_CALL_RE = re.compile(r"^demo call\s+%s(?:\s+([a-z_]+))?$" % CASE_ID, re.I)
+VERIFY_CASE_RE = re.compile(r"^verify case\s+%s$" % CASE_ID, re.I)
 BUSINESS_RE = re.compile(r"^(?:business name|my business is)\s+(.+)$", re.I)
 WATCH_RE = re.compile(r"^(?:watch|monitor)\s+(?!status\b)(.+)$", re.I)
 STOP_WATCH_RE = re.compile(r"^(?:stop watching|stop monitoring|unwatch)\s+(.+)$", re.I)
@@ -575,14 +577,56 @@ def _case_report(store, owner, case):
             else "from the call results", case["summary"])])
     if case.get("decision"):
         lines.extend(["", "**Your decision:** %s." % case["decision"]["decision"]])
+    a = case.get("anchor") or {}
+    if a.get("status") == "anchored":
+        lines.extend(["", "**On-chain record:** a fingerprint of this decision is anchored on the Fetch.ai "
+                          "%s (transaction `%s`). Say `verify case %s` to check it." % (a["network"], a["tx"], case["id"])])
+    elif a.get("status") == "pending":
+        lines.extend(["", "**On-chain record:** waiting to be anchored on the Fetch.ai ledger."])
     nxt = _next_step_lines(case, vendor)
     if nxt:
         lines.extend([""] + nxt)
     return "\n".join(lines)
 
 
+def _anchor_note(store, owner, case_id):
+    """Queue the on-chain fingerprint for a case the user just closed, if anchoring is on."""
+    if anchor.enabled() and anchor.mark_for_anchoring(store, owner, case_id):
+        return ("\n\nA fingerprint of this decision (no names or bank details) will be anchored on the "
+                "Fetch.ai %s, so this record can't be quietly changed later. Say `verify case %s` "
+                "after a few minutes." % (anchor.network(), case_id))
+    return ""
+
+
+def _verify_case_reply(store, owner, case_id):
+    case = cases.get_case(store, owner, case_id)
+    if not case:
+        return "I don't have a case `%s`." % case_id.upper()
+    a = case.get("anchor") or {}
+    if a.get("status") != "anchored":
+        status = anchor.verify(case, None)  # pending or not anchored: no ledger needed
+    else:
+        try:
+            status = anchor.verify(case, anchor.ledger_for_verify(a["network"]))
+        except Exception:
+            status = "unavailable"
+    return {
+        "intact": "✅ Case `%s` matches its on-chain fingerprint (Fetch.ai %s, transaction `%s`). The "
+                  "decision record hasn't changed since it was anchored." % (case["id"], a.get("network"), a.get("tx")),
+        "changed": "❌ Case `%s` does **not** match its on-chain fingerprint. The local record was changed "
+                   "after the decision was anchored." % case["id"],
+        "pending": "Case `%s` is waiting to be anchored. Try again in a few minutes." % case["id"],
+        "not_anchored": "Case `%s` has no on-chain record (only closed cases are anchored, and only when "
+                        "anchoring is switched on)." % case["id"],
+        "unavailable": "I couldn't reach the Fetch.ai ledger just now. Try again later.",
+    }[status]
+
+
 def _case_command(t, low, store, sender, now, llm=OFF):
     """Case commands. Returns a reply, or None if `t` is not one."""
+    m = VERIFY_CASE_RE.match(t)
+    if m:
+        return _verify_case_reply(store, sender, m.group(1))
     if low in MY_CASES or CASE_RE.match(t) or APPROVE_RE.match(t) or REJECT_RE.match(t) \
             or CALLBACK_RE.match(t) or CANCEL_CALL_RE.match(t) or DEMO_CALL_RE.match(t):
         notices = workflow.tick(store, sender, now, client=llm.client)
@@ -661,8 +705,8 @@ def _case_command(t, low, store, sender, now, llm=OFF):
             return "I don't have a case `%s`." % cid
         if status == "approved":
             return ("✅ **Approved case `%s`.** I've updated the saved details for **%s**:\n\n%s\n\nThis was your "
-                    "decision; the checks and any call were evidence, not proof."
-                    % (cid, case["vendor_name"], "\n".join(_change_list(case))))
+                    "decision; the checks and any call were evidence, not proof.%s"
+                    % (cid, case["vendor_name"], "\n".join(_change_list(case)), _anchor_note(store, sender, cid)))
         if status == "already_approved":
             return "Case `%s` is already approved. Nothing more to do." % cid
         if status == "wrong_code":
@@ -691,6 +735,9 @@ def _case_command(t, low, store, sender, now, llm=OFF):
         if case.get("outcome") == "VENDOR_DENIED" or set(case["flags"]) & {"lookalike_domain", "unknown_sender", "reply_to_mismatch"}:
             lines.extend(["", "Consider reporting the email to your bank and your email provider as "
                               "suspected fraud, and don't reply to it."])
+        note = _anchor_note(store, sender, cid)
+        if note:
+            lines.append(note.strip())
         return "\n".join(lines)
     return None
 
