@@ -161,7 +161,8 @@ if mailwatch.configured():
     async def poll_mailbox(ctx: Context):
         """Fetch forwarded emails off the event loop, then process them on it."""
         try:
-            raws = await asyncio.to_thread(mailwatch.fetch_new)
+            skip = list(mailwatch.processed_ids(Store(ctx.storage)))
+            raws = await asyncio.to_thread(mailwatch.fetch_new, None, None, skip)
         except Exception as e:
             ctx.logger.warning("mailbox check failed: %s" % type(e).__name__)  # never the password or text
             return

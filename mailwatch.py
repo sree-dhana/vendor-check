@@ -15,11 +15,13 @@ Checked 2026-11-07:
   forwarding uses a filter (https://support.google.com/mail/answer/10957)."""
 import email
 import email.policy
+import hashlib
 import imaplib
 import os
 import re
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from email.utils import getaddresses, parseaddr
 from urllib.parse import urlparse
 
@@ -155,26 +157,48 @@ def gmail_steps(address, vendor):
 
 # ---------- reading mail ----------
 
-def fetch_new(env=None, imap_factory=None):
-    """Network only (safe to run off the event loop): fetch up to max_per_run unread emails
-    as raw bytes and mark them read (and deleted, if MAILBOX_DELETE_AFTER=1)."""
+LOOKBACK_DAYS = 2
+MAX_PROCESSED = 2000
+
+
+def _message_id_of(header_bytes):
+    msg = email.message_from_bytes(header_bytes or b"", policy=email.policy.default)
+    return (msg.get("Message-ID") or "").strip()
+
+
+def fetch_new(env=None, imap_factory=None, skip_ids=()):
+    """Network only (safe to run off the event loop): fetch up to max_per_run emails from the
+    last LOOKBACK_DAYS that aren't in `skip_ids` (already processed), as raw bytes, and mark
+    them read (and deleted, if MAILBOX_DELETE_AFTER=1).
+
+    Read/unread is not trusted: opening the mailbox in a browser or phone marks emails read,
+    which used to hide them from the agent. Processed Message-IDs are tracked instead."""
     c = config(env)
     factory = imap_factory or imaplib.IMAP4_SSL
     conn = factory(c["host"], c["port"])
-    out = []
+    out, done = [], []
+    skip = set(skip_ids)
+    since = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
     try:
         conn.login(c["user"], c["password"])
         conn.select("INBOX")
-        typ, data = conn.search(None, "UNSEEN")
-        ids = (data[0] or b"").split()[:c["max_per_run"]] if typ == "OK" else []
+        typ, data = conn.search(None, "SINCE", since)
+        ids = (data[0] or b"").split() if typ == "OK" else []
         for i in ids:
-            typ, msg_data = conn.fetch(i, "(RFC822)")
+            if len(out) >= c["max_per_run"]:
+                break
+            typ, head = conn.fetch(i, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            if typ == "OK" and head and isinstance(head[0], tuple) and _message_id_of(head[0][1]) in skip - {""}:
+                continue
+            typ, msg_data = conn.fetch(i, "(BODY.PEEK[])")
             if typ == "OK" and msg_data and isinstance(msg_data[0], tuple):
                 out.append(msg_data[0][1])
+                done.append(i)
+        for i in done:
             conn.store(i, "+FLAGS", "\\Seen")
             if c["delete_after"]:
                 conn.store(i, "+FLAGS", "\\Deleted")
-        if c["delete_after"] and ids:
+        if c["delete_after"] and done:
             conn.expunge()
     finally:
         try:
@@ -182,6 +206,17 @@ def fetch_new(env=None, imap_factory=None):
         except Exception:
             pass
     return out
+
+
+def processed_ids(store):
+    return _get(store, "mail_processed", [])
+
+
+def _mark_processed(store, message_id):
+    done = processed_ids(store)
+    if message_id not in done:
+        done.append(message_id)
+        store.set("mail_processed", done[-MAX_PROCESSED:])
 
 
 def _token_from(msg):
@@ -248,6 +283,10 @@ def handle_message(store, raw, now=None):
     reply to an emailed consent request, for format.consent_result_text)."""
     now = time.time() if now is None else now
     msg = email.message_from_bytes(raw, policy=email.policy.default)
+    message_id = (msg.get("Message-ID") or "").strip() or "sha256:" + hashlib.sha256(raw).hexdigest()[:32]
+    if message_id in processed_ids(store):
+        return []  # each email is handled exactly once, whatever its read/unread flag says
+    _mark_processed(store, message_id)
     token = _token_from(msg)
     owner = owner_for_token(store, token) if token else None
     if not owner:

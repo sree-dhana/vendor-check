@@ -204,11 +204,12 @@ class FakeIMAP:
     def select(self, box):
         return "OK", [b"1"]
 
-    def search(self, charset, crit):
+    def search(self, charset, *criteria):
+        self.criteria = criteria
         return "OK", [b" ".join(str(i + 1).encode() for i in range(len(self.messages)))]
 
     def fetch(self, i, what):
-        return "OK", [(b"1 (RFC822 {n})", self.messages[int(i) - 1])]
+        return "OK", [(b"1 (BODY[] {n})", self.messages[int(i) - 1])]
 
     def store(self, i, op, flag):
         self.flags.setdefault(int(i), []).append(flag)
@@ -232,9 +233,27 @@ def test_fetch_new_caps_marks_seen_and_can_delete():
     assert mailwatch.fetch_new(env, factory) == [b"m0", b"m1", b"m2"]
     imap = made[0]
     assert (imap.host, imap.port, imap.logged_in) == ("imap.gmail.com", 993, (BOX, "app-pass"))
+    assert imap.criteria[0] == "SINCE"  # recent mail, read or unread
     assert imap.flags == {1: ["\\Seen"], 2: ["\\Seen"], 3: ["\\Seen"]} and not imap.expunged
     mailwatch.fetch_new(dict(env, MAILBOX_DELETE_AFTER="1"), factory)
     assert made[1].expunged and "\\Deleted" in made[1].flags[1]
+
+
+def test_fetch_skips_processed_ids_not_read_flags():
+    msgs = [_mail("a@x.in", BOX, "s%d" % i, "body", "<id-%d@x>" % i) for i in range(3)]
+    imap = FakeIMAP("h", 993, msgs)
+    out = mailwatch.fetch_new(ENV, lambda h, p: imap, skip_ids=["<id-0@x>", "<id-2@x>"])
+    assert out == [msgs[1]]
+
+
+def test_email_already_marked_read_is_still_processed_once(store):
+    """The bug: a reply opened in the agent's Gmail in a browser was marked read and never
+    processed. Read/unread no longer matters; each Message-ID is handled exactly once."""
+    address = _watch(store)
+    raw = _mail("accounts@sharmatraders.in", address, "Bank", CHANGE, "<opened-in-browser@s>")
+    assert any(k == "email" for _, k, _ in mailwatch.handle_message(store, raw, now=100))
+    assert mailwatch.handle_message(store, raw, now=200) == []
+    assert "<opened-in-browser@s>" in mailwatch.processed_ids(store)
 
 
 # ---------- silence, privacy, forget ----------
