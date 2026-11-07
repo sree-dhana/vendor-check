@@ -1,0 +1,25 @@
+[Unit]
+Description=VendorCheck Fetch.ai agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=vendorcheck
+Group=vendorcheck
+WorkingDirectory=/opt/vendorcheck/agent
+ExecStart=/opt/vendorcheck/agent/.venv/bin/python agent.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+# The agent only makes outgoing connections (Agentverse mailbox, lookups, AI, Gmail, ledger):
+# no inbound ports are needed. Lock the service down to its own folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/vendorcheck/agent
+
+[Install]
+WantedBy=multi-user.target
