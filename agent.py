@@ -45,7 +45,9 @@ class Store:
         self.s.set(key, value)
 
 
-def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
+def create_text_chat(text: str, end_session: bool = True) -> ChatMessage:
+    # Fetch.ai's ASI:One sample ends each reply with EndSessionContent. Our state lives in
+    # agent storage, not chat history, so ending the turn loses nothing.
     content = [TextContent(type="text", text=text)]
     if end_session:
         content.append(EndSessionContent(type="end-session"))
@@ -90,7 +92,10 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             "or say `help` to see what I can check."
         )
 
-    await ctx.send(sender, create_text_chat(reply))
+    status = await ctx.send(sender, create_text_chat(reply))
+    # delivery result only: never the message text
+    ctx.logger.info("Reply handed over: %s, %d chars, to %s via %s" % (
+        status.status.value, len(reply), sender[:14], status.endpoint or "no endpoint"))
 
 
 @protocol.on_message(ChatAcknowledgement)

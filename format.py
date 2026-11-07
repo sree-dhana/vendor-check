@@ -757,7 +757,19 @@ def reply_for_text(text, store, sender="local", now=None, llm=OFF):
     return "\n".join(digest) + reply if digest else reply
 
 
+REPLY_BUDGET_S = 5.0  # optional AI steps are skipped once a reply has taken this long
+_clock = time.monotonic
+
+
+def _within_budget(started):
+    """Feedback from testers: replies must always arrive. The code-based checks always run;
+    the optional AI steps (extraction, wording labels, summary) only run while the reply is
+    still inside its time budget, so slow services can't hold a reply back."""
+    return _clock() - started < REPLY_BUDGET_S
+
+
 def _reply_for_text(text, store, sender, now, llm):
+    started = _clock()
     if not allow_message(store, sender, now):
         return RATE_LIMITED_TEXT
     t = LEADING_MENTIONS.sub("", text or "").strip()
@@ -854,7 +866,7 @@ def _reply_for_text(text, store, sender, now, llm):
 
     llm_read = None
     if (llm.client and llm.extract and not from_saved and should_extract(t, found)
-            and allow_llm(store, sender, now)):
+            and _within_budget(started) and allow_llm(store, sender, now)):
         res = extract_ids_llm(t, llm.client)
         if res:
             new = [(k, v) for k in ("gstin", "pan", "ifsc", "pin") for v in res[k] if v not in found[k]]
@@ -866,7 +878,7 @@ def _reply_for_text(text, store, sender, now, llm):
                 llm_read = (new, res["vendor_name"])
                 nothing = False
     if (llm.client and llm.flags and flags_inconclusive(t, flag_labels)
-            and allow_llm(store, sender, now)):
+            and _within_budget(started) and allow_llm(store, sender, now)):
         flag_labels = classify_flags_llm(t, llm.client) or flag_labels
 
     if nothing:
@@ -887,7 +899,7 @@ def _reply_for_text(text, store, sender, now, llm):
 
     ev = _evaluate(found, bad, store, vendor, changed, same)
     summary = None
-    if llm.client and llm.summary and allow_llm(store, sender, now):
+    if llm.client and llm.summary and _within_budget(started) and allow_llm(store, sender, now):
         summary = summarize(summary_input(ev, changed, flag_labels), llm.client)
     return _check_reply(
         ev, flag_labels=flag_labels, vendor=vendor, changed=changed, from_saved=from_saved,
