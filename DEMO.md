@@ -24,7 +24,7 @@
 ```
 @vendorchecker save vendor Sharma Traders GSTIN 27AAPFU0939F1ZV IFSC YESB0DNB002 account 1234567890 phone +91 98765 43210 email YOUR@EMAIL contact Ravi Sharma
 ```
-> Say: "The phone number is one I already trust. The agent drafts a consent request for me to send; it never contacts the vendor itself."
+> Say: "The phone number is one I already trust. The agent drafts a consent request; it only contacts the vendor if I say `send consent`, and then records their reply automatically. For the demo I'll paste a reply."
 
 Then record the vendor's reply:
 ```

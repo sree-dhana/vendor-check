@@ -15,7 +15,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from format import first_contact, reply_for_text
-from format import email_alert, email_alert_short
+from format import consent_result_text, email_alert, email_alert_short
 from llm import PROVIDERS, load_config
 import anchor
 import mailwatch
@@ -171,6 +171,11 @@ if mailwatch.configured():
                 for owner, kind, payload in mailwatch.handle_message(store, raw):
                     if kind == "text":
                         await deliver(ctx, store, owner, payload)
+                    elif kind == "consent":
+                        await deliver(ctx, store, owner, "📩 **Consent reply received**\n\n" +
+                                      consent_result_text(**payload),
+                                      "%s answered your consent request: %s." % (
+                                          payload["vendor_name"], payload["status"]))
                     else:
                         await deliver(ctx, store, owner, email_alert(payload), email_alert_short(payload))
             except Exception:

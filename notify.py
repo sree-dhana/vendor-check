@@ -84,10 +84,15 @@ def email_available(env=None):
     return bool(c["host"] and c["user"] and c["password"])
 
 
-def send_email(to, subject, body, env=None, smtp_factory=None):
+def send_email(to, subject, body, env=None, smtp_factory=None, reply_to=None, msg_id=None,
+               from_name="VendorCheck"):
     c = smtp_config(env)
     msg = EmailMessage()
-    msg["From"], msg["To"], msg["Subject"] = "VendorCheck <%s>" % c["from"], to, subject
+    msg["From"], msg["To"], msg["Subject"] = "%s <%s>" % (from_name, c["from"]), to, subject
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    if msg_id:
+        msg["Message-ID"] = msg_id
     msg.set_content(body)
     factory = smtp_factory or smtplib.SMTP_SSL
     with factory(c["host"], c["port"], timeout=15) as s:

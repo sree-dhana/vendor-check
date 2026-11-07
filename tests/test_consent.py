@@ -36,7 +36,8 @@ REPLY_OK = ("consent reply Sharma Traders\nFrom: Ravi Sharma <accounts@sharmatra
 
 def test_draft_request_is_plain_text_for_the_user_to_send(store):
     out = _say(store, "consent request Sharma Traders")
-    assert "**Send it yourself**" in out and "I never contact vendors" in out
+    assert "I only contact a vendor when you tell me to" in out
+    assert "Send it yourself" in out  # no mailbox configured in this test, so only the manual way
     assert "Hello Ravi Sharma," in out and PHONE in out
     assert "1. CALLS: YES or NO" in out and "2. RECORDING: YES or NO" in out
     assert "withdraw your answer at any time" in out and "call from a person instead" in out

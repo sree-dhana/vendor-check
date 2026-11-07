@@ -12,7 +12,7 @@ Protects small businesses from vendor-payment mistakes and "we've changed our ba
 
 ## The protection workflow
 1. `save vendor <name> GSTIN … IFSC … account … phone … email …` to register a vendor, with a phone number you already have.
-2. `consent request <name>`: a message for **you** to send, asking whether they agree to verification calls. I never contact vendors.
+2. `consent request <name>`: shows a message asking whether they agree to verification calls. Send it yourself, or say `send consent <name>` and I'll email it to their saved address on your behalf and record their reply automatically. I only contact a vendor when you tell me to.
 3. `watch <name>`: forward their emails to your private address; I never get access to your inbox. Or paste one with `check email`.
 4. If an email asks to change bank details, a **case opens and the payment is held**.
 5. Confirm on the **saved** number: you call (I give you a script), or, with consent, an automated call does. **A call result is evidence, not proof.**

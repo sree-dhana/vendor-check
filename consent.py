@@ -1,7 +1,10 @@
 """Vendor consent for automated verification calls. Plain code, no LLM.
 
-The agent never contacts the vendor. It drafts a request for the user to send, then reads
-the vendor's reply that the user pastes back. Calls and recording are separate yes/no
+The agent drafts a request and shows it to the user. The user either sends it themselves and
+pastes the reply back, or confirms with `send consent <vendor>`, after which the agent emails
+it once to the vendor's saved address, with Reply-To set to the user's private forwarding
+address so the reply is recorded automatically. The agent never contacts a vendor unless
+the user confirms. Calls and recording are separate yes/no
 answers. Consent applies only to the saved phone number it was given for; a reply from an
 address that isn't saved for the vendor is not trusted until the user confirms it by
 calling the saved number. Consent never makes a call result trustworthy and never removes
@@ -49,6 +52,56 @@ def draft_request(vendor, business_name=None):
         "Thank you,",
         sign,
     ])
+
+
+RESEND_AFTER = 86400  # at most one emailed request per vendor per day
+QUOTE_START = re.compile(r"^(?:on .+wrote:|-{2,}\s*(?:original message|forwarded message)\s*-{2,}|from:\s.+@)", re.I)
+
+
+def email_body(vendor, business_name=None):
+    """The request as emailed by the agent: the draft without its Subject line, plus a note
+    saying who sent it and why."""
+    lines = draft_request(vendor, business_name).split("\n")[2:]
+    sign = business_name or "your customer"
+    lines.extend(["", "--", "Sent by VendorCheck on behalf of %s, at their request. Just reply to this "
+                        "email; your answer goes straight to them." % sign])
+    return "\n".join(lines)
+
+
+def email_subject(business_name=None):
+    return "%sChecking requests to change your bank details" % ("%s: " % business_name if business_name else "")
+
+
+def strip_quoted(text):
+    """The vendor's own words only: drop quoted lines and everything from the quoted original
+    on. Our request itself says 'CALLS: YES or NO', so quoting it must never count as a yes."""
+    out = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if QUOTE_START.match(s):
+            break
+        if s.startswith(">") or "YES or NO" in s:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def mark_sent(store, owner, vendor, to, msg_id, now=None):
+    now = time.time() if now is None else now
+    record = dict(vendor.get("consent") or {})
+    record.update({"status": "pending", "version": record.get("version", WORDING_VERSION),
+                   "phone": vendor.get("phone"), "requested_at": record.get("requested_at", now),
+                   "sent_to": to, "sent_at": now, "request_msgid": msg_id})
+    return _update(store, owner, vendor["id"], record)
+
+
+def vendor_for_reply(store, owner, reference_ids):
+    """The vendor whose emailed request this message replies to (by In-Reply-To/References)."""
+    for rec in vendors.list_vendors(store, owner):
+        msgid = (rec.get("consent") or {}).get("request_msgid")
+        if msgid and msgid in reference_ids:
+            return rec
+    return None
 
 
 def parse_reply(text):

@@ -1,5 +1,6 @@
 import re
 import time
+from email.utils import make_msgid
 
 from checks import (
     MAX_PER_TYPE,
@@ -75,6 +76,7 @@ CONSENT_REPLY_RE = re.compile(
     re.I | re.S)
 CONFIRM_CONSENT_RE = re.compile(r"^confirm consent\s+(?:for\s+)?(.+)$", re.I)
 REVOKE_RE = re.compile(r"^(?:revoke|withdraw) consent\s+(?:for\s+)?(.+)$", re.I)
+SEND_CONSENT_RE = re.compile(r"^send consent(?: request)?\s+(?:to\s+|for\s+)?(.+)$", re.I)
 CASE_ID = r"(C[A-Za-z0-9]{5})"
 MY_CASES = {"my cases", "cases", "open cases", "all cases"}
 CASE_RE = re.compile(r"^case\s+%s$" % CASE_ID, re.I)
@@ -273,7 +275,7 @@ def _save_vendor_reply(rest, store, sender, now):
                           % (", ".join(rec["emails"]), rec["name"])])
     if status == "saved" and rec.get("phone") and wants_monitoring:
         consent.mark_requested(store, sender, rec, now)
-        lines.extend(["", _consent_draft_reply(rec)])
+        lines.extend(["", _consent_draft_reply(store, sender, rec)])
     elif rec.get("phone") and (rec.get("consent") or {}).get("status") == "not_requested":
         lines.extend(["", "To allow automated verification calls later, say `consent request %s` and I'll "
                           "draft a message for you to send them." % rec["name"]])
@@ -302,7 +304,7 @@ def _llm_read_line(llm_read, provider_name):
 
 def _consent_command(t, store, sender, now):
     """Consent commands. Returns a reply, or None if `t` is not one."""
-    for regex, kind in ((CONSENT_REPLY_RE, "reply"), (CONSENT_REQ_RE, "request"),
+    for regex, kind in ((CONSENT_REPLY_RE, "reply"), (SEND_CONSENT_RE, "send"), (CONSENT_REQ_RE, "request"),
                         (CONFIRM_CONSENT_RE, "confirm"), (REVOKE_RE, "revoke")):
         m = regex.match(t)
         if m:
@@ -314,28 +316,20 @@ def _consent_command(t, store, sender, now):
     if not vendor:
         return "I don't have a saved vendor called **%s**. Say `my vendors` to see the list." % name
 
+    if kind in ("request", "send") and not vendor.get("phone"):
+        return ("Save a phone number for **%s** first, so the request names the number we'd call: "
+                "`save vendor %s phone +91 98765 43210`." % (vendor["name"], vendor["name"]))
+
     if kind == "request":
-        if not vendor.get("phone"):
-            return ("Save a phone number for **%s** first, so the request names the number we'd call: "
-                    "`save vendor %s phone +91 98765 43210`." % (vendor["name"], vendor["name"]))
         consent.mark_requested(store, sender, vendor, now)
-        return _consent_draft_reply(vendor)
+        return _consent_draft_reply(store, sender, vendor)
+
+    if kind == "send":
+        return _send_consent(store, sender, vendor, now)
 
     if kind == "reply":
         status, record, warnings = consent.record_reply(store, sender, vendor, m.group(2), now)
-        lines = []
-        if status == "granted":
-            lines.append("✅ Recorded: **%s** agreed to automated verification calls to `%s`. Recording: %s."
-                         % (vendor["name"], record["phone"], "yes" if record["recording"] else "no"))
-        elif status == "declined":
-            lines.append("Recorded: **%s** declined automated calls. If their details change, you'll get "
-                         "a script to call them yourself." % vendor["name"])
-        elif status == "pending":
-            lines.append("Not accepted yet: consent for **%s** stays pending." % vendor["name"])
-        lines.extend("⚠️ %s" % w for w in warnings)
-        lines.extend(["", "Consent never makes a call result proof, and you still approve every change yourself. "
-                          "Say `revoke consent %s` at any time." % vendor["name"]])
-        return "\n".join(lines).strip()
+        return consent_result_text(vendor["name"], status, record, warnings)
 
     if kind == "confirm":
         status, record = consent.confirm(store, sender, vendor, now)
@@ -453,18 +447,78 @@ def email_alert(res):
     return "📩 **New forwarded email**\n\n" + _email_reply(res)
 
 
-def _consent_draft_reply(vendor):
-    return "\n".join([
-        "Here's a consent request for **%s**. **Send it yourself** from your usual email (or read it "
-        "out when you call them). I never contact vendors." % vendor["name"],
+def consent_result_text(vendor_name, status, record, warnings):
+    """What was recorded from a vendor's consent reply (pasted, or arriving by email)."""
+    lines = []
+    if status == "granted":
+        lines.append("✅ Recorded: **%s** agreed to automated verification calls to `%s`. Recording: %s."
+                     % (vendor_name, record["phone"], "yes" if record["recording"] else "no"))
+    elif status == "declined":
+        lines.append("Recorded: **%s** declined automated calls. If their details change, you'll get "
+                     "a script to call them yourself." % vendor_name)
+    elif status == "pending":
+        lines.append("Not accepted yet: consent for **%s** stays pending." % vendor_name)
+    lines.extend("⚠️ %s" % w for w in warnings)
+    lines.extend(["", "Consent never makes a call result proof, and you still approve every change yourself. "
+                      "Say `revoke consent %s` at any time." % vendor_name])
+    return "\n".join(lines).strip()
+
+
+def _consent_draft_reply(store, owner, vendor):
+    business = workflow.business_name(store, owner)
+    lines = [
+        "Here's a consent request for **%s**. I only contact a vendor when you tell me to." % vendor["name"],
         "",
         "```",
-        consent.draft_request(vendor),
+        consent.draft_request(vendor, business),
         "```",
         "",
-        "When they answer, paste their reply here starting with `consent reply %s` on the first line."
-        % vendor["name"],
-    ])
+    ]
+    if vendor.get("emails") and mailwatch.configured():
+        lines.append("**To have me email it** to %s on your behalf, say `send consent %s`. Their reply comes "
+                     "back to me and I'll record it automatically." % (vendor["emails"][0], vendor["name"]))
+        lines.append("Or send it yourself from your usual email, which vendors may recognise more easily, and "
+                     "paste their reply with `consent reply %s`." % vendor["name"])
+    else:
+        lines.append("Send it yourself from your usual email (or read it out when you call them), then paste "
+                     "their reply here starting with `consent reply %s` on the first line." % vendor["name"])
+    if not business:
+        lines.append("Tip: say `business name <your business>` so the request is signed with your name.")
+    return "\n".join(lines)
+
+
+def _send_consent(store, owner, vendor, now):
+    """Email the consent request to the vendor's saved address, after the user said so."""
+    if not vendor.get("emails"):
+        return ("Save an email address for **%s** first: `save vendor %s email accounts@example.com`."
+                % (vendor["name"], vendor["name"]))
+    if not mailwatch.configured():
+        return "Sending emails isn't switched on for this agent (its mailbox isn't configured)."
+    record = vendor.get("consent") or {}
+    if record.get("status") == "granted":
+        return "**%s** has already agreed: %s." % (vendor["name"], consent.describe(record))
+    if not record.get("requested_at"):
+        consent.mark_requested(store, owner, vendor, now)
+        return "\n".join([_consent_draft_reply(store, owner, vendor), "",
+                          "Check the message above, then say `send consent %s` again to send it." % vendor["name"]])
+    sent_now = time.time() if now is None else now
+    if record.get("sent_at") and sent_now - record["sent_at"] < consent.RESEND_AFTER:
+        return ("I already emailed **%s** at %s in the last day. To avoid looking like spam, I'll wait a day "
+                "before sending again." % (vendor["name"], record.get("sent_to")))
+    to = vendor["emails"][0]
+    business = workflow.business_name(store, owner)
+    reply_to = mailwatch.ensure_token(store, owner)
+    msg_id = make_msgid(domain=reply_to.rsplit("@", 1)[1])
+    try:
+        notify.send_email(to, consent.email_subject(business), consent.email_body(vendor, business),
+                          reply_to=reply_to, msg_id=msg_id,
+                          from_name="VendorCheck for %s" % business if business else "VendorCheck")
+    except Exception:
+        return "I couldn't send the email just now. Please try again in a few minutes."
+    consent.mark_sent(store, owner, vendor, to, msg_id, now)
+    return ("✅ Sent the consent request to **%s** (%s), saying it comes from VendorCheck on your behalf. "
+            "When they reply, I'll record their answer and tell you. You can check with `vendor %s`."
+            % (vendor["name"], to, vendor["name"]))
 
 
 def _email_text(t):

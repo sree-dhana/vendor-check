@@ -10,7 +10,7 @@ The legal side of this product is **not settled and needs careful study before r
 ## How it works
 1. **`start`**: a short setup (your country, whether you pay vendors or get paid, your vendors' countries, email monitoring) with the legal notice. No AI is used.
 2. **Register vendors** with their IDs, a **phone number you already have** and their email address.
-3. **Ask for consent**: the agent drafts a message for **you** to send the vendor, asking separately whether they agree to automated verification calls and to recording. You paste their reply back.
+3. **Ask for consent**: the agent drafts a message asking separately whether the vendor agrees to automated verification calls and to recording, and shows it to you. Either send it yourself and paste their reply back, or say `send consent <vendor>` and the agent emails it **once**, to the vendor's saved address, saying it comes from VendorCheck on your behalf; their reply comes back to the agent and is recorded automatically. The agent never contacts a vendor unless you tell it to.
 4. **Watch emails**: forward a vendor's emails to your private address (the agent guides you through Gmail's settings). The agent never gets access to your inbox.
 5. **A change request opens a case and holds the payment.** If an email asks to change bank, tax, name or phone details, you get an alert with the old and new values (masked) and why it was flagged.
 6. **Confirm by phone, on the saved number only**: with consent and calls switched on, an automated call asks the vendor whether they sent the request and to read back the last digits; otherwise you get a short script to call them yourself. **A call result is evidence, never proof.**
@@ -33,7 +33,9 @@ Say `rules <country>` to see a profile's facts, each with its source and the dat
 | Paste IDs, or `Check this vendor: GSTIN …, PAN …, IFSC …` | A one-off check |
 | `save vendor <name> GSTIN … IFSC … account … phone … email … contact …` | Register or update a vendor (details merge) |
 | `vendor <name>`, `my vendors`, `check <name>` | See saved vendors; re-check one or compare new details |
-| `consent request <vendor>` / `consent reply <vendor>` + pasted reply | Draft the consent message for you to send; record the answer |
+| `consent request <vendor>` | Show the consent message |
+| `send consent <vendor>` | Email it to the vendor's saved address on your behalf (at most once a day); their reply is recorded automatically |
+| `consent reply <vendor>` + pasted reply | Record an answer you received yourself |
 | `confirm consent <vendor>`, `revoke consent <vendor>` | Accept a reply from an unsaved address after checking; withdraw consent |
 | `watch <vendor>`, `watch status`, `stop watching <vendor>` | Email monitoring with your private forwarding address |
 | `check email` + pasted email | Check one email by hand |
@@ -67,6 +69,7 @@ Emails, vendor replies and call transcripts are treated as data, never instructi
 - **ASI:One AI model**: up to the first 500 characters of a message, only when the built-in parser can't read it; check results for the optional summary; a call transcript and its comparison for the call summary (transcripts are never stored).
 - **Public lookups**: only the code itself: IFSC at ifsc.razorpay.com, PIN at api.postalpincode.in (a backup PIN service is tried over plain HTTP if that is down), EU VAT numbers at the EU's VIES service.
 - **The agent's Gmail mailbox**: emails you forward to it are read and their text processed in memory, never stored by the agent (they stay in that mailbox unless `MAILBOX_DELETE_AFTER=1`). Backup alert emails you opt into are short and never contain bank details.
+- **Consent emails to vendors** (only after you say `send consent <vendor>`): the request goes from the agent's Gmail to the vendor's saved address, with your business name, the vendor's contact name and the saved phone number in it. The vendor's reply comes back to your private forwarding address; only their answers are stored, never the reply text.
 - **Fetch.ai ledger** (when anchoring is on): only a salted fingerprint of each closed case. The salt stays local, so the fingerprint reveals nothing; it cannot be deleted from the ledger.
 - Messages reach the agent through ASI:One and the Agentverse mailbox, whose own policies apply.
 

@@ -23,6 +23,7 @@ import time
 from email.utils import getaddresses, parseaddr
 from urllib.parse import urlparse
 
+import consent
 import detect
 
 GOOGLE_FWD_SENDER = "forwarding-noreply@google.com"
@@ -84,13 +85,8 @@ def owner_for_token(store, token):
     return _get(store, "watch_tokens", {}).get(token)
 
 
-def start_watching(store, owner, vendor, env=None, now=None):
-    """The user said yes to watching this vendor's emails. Returns (status, address)."""
-    if not (vendor.get("emails") or vendor.get("domains")):
-        return "no_email", None
-    if not configured(env):
-        return "no_mailbox", None
-    now = time.time() if now is None else now
+def ensure_token(store, owner, env=None):
+    """The user's private forwarding address on the agent mailbox, created if needed."""
     state = watch_state(store, owner)
     if not state.get("token"):
         token = secrets.token_hex(5)
@@ -98,6 +94,19 @@ def start_watching(store, owner, vendor, env=None, now=None):
         tokens = _get(store, "watch_tokens", {})
         tokens[token] = owner
         store.set("watch_tokens", tokens)
+        _save_state(store, owner, state)
+    return forwarding_address(config(env)["address"], state["token"])
+
+
+def start_watching(store, owner, vendor, env=None, now=None):
+    """The user said yes to watching this vendor's emails. Returns (status, address)."""
+    if not (vendor.get("emails") or vendor.get("domains")):
+        return "no_email", None
+    if not configured(env):
+        return "no_mailbox", None
+    now = time.time() if now is None else now
+    ensure_token(store, owner, env)
+    state = watch_state(store, owner)
     ids = state.setdefault("vendors", [])
     if vendor["id"] not in ids:
         ids.append(vendor["id"])
@@ -234,8 +243,9 @@ def forwarding_confirmation(msg):
 
 
 def handle_message(store, raw, now=None):
-    """Process one fetched email. Returns [(owner, kind, payload)] where kind is
-    'text' (a ready message) or 'email' (a detect result for format.email_alert)."""
+    """Process one fetched email. Returns [(owner, kind, payload)] where kind is 'text' (a
+    ready message), 'email' (a detect result for format.email_alert) or 'consent' (a vendor's
+    reply to an emailed consent request, for format.consent_result_text)."""
     now = time.time() if now is None else now
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     token = _token_from(msg)
@@ -244,6 +254,14 @@ def handle_message(store, raw, now=None):
         return []  # not addressed to a known user: ignored, nothing stored
     state = watch_state(store, owner)
     out = []
+    refs = set(re.findall(r"<[^>]+>", "%s %s" % (msg.get("In-Reply-To", ""), msg.get("References", ""))))
+    vendor = consent.vendor_for_reply(store, owner, refs) if refs else None
+    if vendor:  # the vendor answering a consent request the agent emailed for this user
+        sender = parseaddr(msg.get("From", ""))[1].lower()
+        status, record, warnings = consent.record_reply(
+            store, owner, vendor, "From: %s\n\n%s" % (sender, consent.strip_quoted(_plain_body(msg))), now)
+        return [(owner, "consent", {"vendor_name": vendor["name"], "status": status,
+                                    "record": record, "warnings": warnings})]
     conf = forwarding_confirmation(msg)
     if conf is not None:
         text = "Gmail sent a confirmation for your forwarding address."
